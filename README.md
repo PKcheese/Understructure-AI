@@ -48,10 +48,11 @@ Exports `structure.json`, `structure.obj`, and (optionally) the raw `landmarks.n
 ```bash
 python overlay_landmarks_structure.py \
   --image input.jpg \
-  --output outputs/structure_overlay.png
+  --output outputs/structure_overlay_2d.png \
+  --output-3d outputs/structure_overlay_3d.png
 ```
 
-Creates an annotated photo showing labeled joints, limb cylinders, and torso/head boxes.
+Creates both annotated renders: the original 2D capsule/box overlay (`structure_overlay_2d.png`) plus the pyrender/trimesh shaded rig (`structure_overlay_3d.png`).
 
 ## Optional: one-shot pipeline
 
@@ -61,12 +62,13 @@ python gesture_structure_pipeline.py \
   --output-dir outputs/full_run
 ```
 
-This now also emits `structure_overlay.png` (with capsule limbs shaded to imply cylinders) alongside the earlier gesture/structure exports. The OBJ output uses low-poly cylinders for limbs instead of simple lines.
+This now also emits both `structure_overlay_2d.png` (capsule/box overlay) and `structure_overlay_3d.png` (trimesh+pyrender) alongside the earlier gesture/structure exports. The OBJ output uses low-poly cylinders for limbs instead of simple lines.
 
 ## Under the hood
 
 1. [MediaPipe Pose](https://developers.google.com/mediapipe/solutions/vision/pose) extracts 33 landmarks in image and “world” coordinates.
 2. Gesture splines use Chaikin smoothing over line-of-action and limb chains.
 3. Structure boxes derive from hip/shoulder frames and simple scale heuristics; limbs become cylinders encoded as segments.
+4. Shaded overlays are rendered with trimesh primitives through pyrender, using a camera estimated from landmark correspondences.
 
-Tweak chain definitions or scaling heuristics in `pose_utils.py` to suit your style.
+Tweak chain definitions or scaling heuristics in `pose_utils.py`, or customize lighting/material settings in `structure_renderer.py`, to suit your style.

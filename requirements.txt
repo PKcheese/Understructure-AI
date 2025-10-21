@@ -1,3 +1,5 @@
 mediapipe==0.10.14
 opencv-python==4.9.0.80
 numpy==1.26.4
+pyrender==0.1.45
+trimesh==4.4.3

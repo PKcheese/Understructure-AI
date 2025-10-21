@@ -25,6 +25,7 @@ from pose_utils import (
     run_pose_estimation,
     smooth_curve,
 )
+from structure_renderer import composite_overlay, render_structure_overlay
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,9 +63,6 @@ def main() -> None:
 
     boxes = compute_oriented_boxes(k3d)
     limbs = compute_limb_segments(k3d)
-
-    boxes_2d = compute_oriented_boxes_2d(k2d)
-    limbs_2d = compute_limb_segments_2d(k2d)
     key_labels = [
         (mp.solutions.pose.PoseLandmark.LEFT_HIP, "left hip"),
         (mp.solutions.pose.PoseLandmark.RIGHT_HIP, "right hip"),
@@ -88,11 +86,22 @@ def main() -> None:
         landmarks_3d=k3d,
     )
 
-    labeled = draw_landmark_labels(image, k2d, key_labels)
-    structure_overlay = draw_structure_overlay(
-        labeled, boxes_2d, limbs_2d, k2d, label_landmarks=False
+    overlay_rgba = render_structure_overlay(image, k2d, k3d, boxes, limbs)
+    structure_overlay_3d = composite_overlay(image, overlay_rgba)
+    structure_overlay_3d = draw_landmark_labels(structure_overlay_3d, k2d, key_labels)
+    cv2.imwrite(
+        str(args.output_dir / "structure_overlay_3d.png"), structure_overlay_3d
     )
-    cv2.imwrite(str(args.output_dir / "structure_overlay.png"), structure_overlay)
+
+    structure_overlay_2d = draw_landmark_labels(image.copy(), k2d, key_labels)
+    boxes_2d = compute_oriented_boxes_2d(k2d)
+    limbs_2d = compute_limb_segments_2d(k2d)
+    structure_overlay_2d = draw_structure_overlay(
+        structure_overlay_2d, boxes_2d, limbs_2d, k2d, label_landmarks=False
+    )
+    cv2.imwrite(
+        str(args.output_dir / "structure_overlay_2d.png"), structure_overlay_2d
+    )
 
     print(f"Wrote outputs to {args.output_dir}")
 

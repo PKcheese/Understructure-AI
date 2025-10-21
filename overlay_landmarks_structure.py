@@ -10,12 +10,15 @@ from pathlib import Path
 import mediapipe as mp
 
 from pose_utils import (
+    compute_limb_segments,
     compute_limb_segments_2d,
+    compute_oriented_boxes,
     compute_oriented_boxes_2d,
     draw_landmark_labels,
     draw_structure_overlay,
     run_pose_estimation,
 )
+from structure_renderer import composite_overlay, render_structure_overlay
 
 
 LMS = mp.solutions.pose.PoseLandmark
@@ -32,13 +35,21 @@ def parse_args() -> argparse.Namespace:
         default=Path("structure_overlay.png"),
         help="Output image path for the combined overlay.",
     )
+    parser.add_argument(
+        "--output-3d",
+        type=Path,
+        default=Path("structure_overlay_3d.png"),
+        help="Output image path for the pyrender overlay.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    image, k2d, _ = run_pose_estimation(args.image)
+    image, k2d, k3d = run_pose_estimation(args.image)
 
+    boxes = compute_oriented_boxes(k3d)
+    limbs = compute_limb_segments(k3d)
     boxes_2d = compute_oriented_boxes_2d(k2d)
     limbs_2d = compute_limb_segments_2d(k2d)
 
@@ -56,22 +67,22 @@ def main() -> None:
         (LMS.NOSE, "nose"),
     ]
 
-    # Start by plotting labeled landmarks, then structure on top.
-    labeled = draw_landmark_labels(image, k2d, key_labels)
-    combined = draw_structure_overlay(
-        labeled,
-        boxes_2d,
-        limbs_2d,
-        k2d,
-        label_landmarks=False,
+    overlay_rgba = render_structure_overlay(image, k2d, k3d, boxes, limbs)
+    combined_3d = composite_overlay(image, overlay_rgba)
+    combined_3d = draw_landmark_labels(combined_3d, k2d, key_labels)
+
+    combined_2d = draw_landmark_labels(image.copy(), k2d, key_labels)
+    combined_2d = draw_structure_overlay(
+        combined_2d, boxes_2d, limbs_2d, k2d, label_landmarks=False
     )
 
     import cv2
 
-    cv2.imwrite(str(args.output), combined)
-    print(f"Saved structure overlay to {args.output}")
+    cv2.imwrite(str(args.output), combined_2d)
+    cv2.imwrite(str(args.output_3d), combined_3d)
+    print(f"Saved 2D overlay to {args.output}")
+    print(f"Saved 3D overlay to {args.output_3d}")
 
 
 if __name__ == "__main__":
     main()
-
