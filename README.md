@@ -61,7 +61,7 @@ python gesture_structure_pipeline.py \
   --output-dir outputs/full_run
 ```
 
-This now also emits `structure_overlay.png` alongside the earlier gesture/structure exports.
+This now also emits `structure_overlay.png` (with capsule limbs shaded to imply cylinders) alongside the earlier gesture/structure exports. The OBJ output uses low-poly cylinders for limbs instead of simple lines.
 
 ## Under the hood
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
@@ -302,11 +303,22 @@ def compute_limb_segments(landmarks_3d: np.ndarray) -> List[LimbSegment]:
     }
 
     segments: List[LimbSegment] = []
+    radius_scale = {
+        "left_thigh": 0.18,
+        "right_thigh": 0.18,
+        "left_calf": 0.12,
+        "right_calf": 0.12,
+        "left_upper_arm": 0.12,
+        "right_upper_arm": 0.12,
+        "left_forearm": 0.09,
+        "right_forearm": 0.09,
+    }
     for name, (a_idx, b_idx) in limb_pairs.items():
         start = landmarks_3d[a_idx.value]
         end = landmarks_3d[b_idx.value]
         length = np.linalg.norm(end - start)
-        radius = max(length * 0.1, 1e-3)
+        scale = radius_scale.get(name, 0.1)
+        radius = max(length * scale, 1e-3)
         segments.append(LimbSegment(name, start, end, radius))
     return segments
 
@@ -343,7 +355,6 @@ def export_structure_obj(
 ) -> None:
     vertices: List[np.ndarray] = []
     faces: List[Tuple[int, int, int]] = []
-    lines: List[Tuple[int, int]] = []
 
     def add_vertex(pt: np.ndarray) -> int:
         vertices.append(pt)
@@ -376,9 +387,14 @@ def export_structure_obj(
         )
 
     for limb in limbs:
-        start_idx = add_vertex(limb.start)
-        end_idx = add_vertex(limb.end)
-        lines.append((start_idx, end_idx))
+        cyl_vertices, cyl_faces = _cylinder_mesh(
+            limb.start, limb.end, limb.radius, segments=12
+        )
+        base_index = len(vertices)
+        for v in cyl_vertices:
+            vertices.append(v)
+        for tri in cyl_faces:
+            faces.append(tuple(base_index + idx for idx in tri))
 
     with output_path.open("w", encoding="ascii") as fh:
         fh.write("# Gesture structure export\n")
@@ -386,8 +402,64 @@ def export_structure_obj(
             fh.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
         for a, b, c in faces:
             fh.write(f"f {a} {b} {c}\n")
-        for a, b in lines:
-            fh.write(f"l {a} {b}\n")
+
+
+def _cylinder_mesh(
+    start: np.ndarray, end: np.ndarray, radius: float, segments: int = 12
+) -> Tuple[List[np.ndarray], List[Tuple[int, int, int]]]:
+    axis = end - start
+    length = np.linalg.norm(axis)
+    if length < 1e-6:
+        return [], []
+    axis_dir = axis / length
+
+    # Create orthonormal basis around the axis.
+    if abs(axis_dir[0]) < 0.9:
+        arbitrary = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    else:
+        arbitrary = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    tangent = _normalize(np.cross(axis_dir, arbitrary))
+    bitangent = _normalize(np.cross(axis_dir, tangent))
+
+    verts: List[np.ndarray] = []
+    faces: List[Tuple[int, int, int]] = []
+    bottom_indices: List[int] = []
+    top_indices: List[int] = []
+
+    for i in range(segments):
+        theta = 2.0 * math.pi * i / segments
+        offset = radius * (math.cos(theta) * tangent + math.sin(theta) * bitangent)
+        bottom = start + offset
+        top = end + offset
+        bottom_indices.append(len(verts))
+        verts.append(bottom)
+        top_indices.append(len(verts))
+        verts.append(top)
+
+    # Side faces (two triangles per rectangular panel)
+    for i in range(segments):
+        b0 = bottom_indices[i]
+        t0 = top_indices[i]
+        b1 = bottom_indices[(i + 1) % segments]
+        t1 = top_indices[(i + 1) % segments]
+        faces.append((b0 + 1, b1 + 1, t1 + 1))
+        faces.append((b0 + 1, t1 + 1, t0 + 1))
+
+    # Caps
+    bottom_center_idx = len(verts)
+    verts.append(start)
+    top_center_idx = len(verts)
+    verts.append(end)
+
+    for i in range(segments):
+        b0 = bottom_indices[i]
+        b1 = bottom_indices[(i + 1) % segments]
+        faces.append((bottom_center_idx + 1, b1 + 1, b0 + 1))
+        t0 = top_indices[i]
+        t1 = top_indices[(i + 1) % segments]
+        faces.append((top_center_idx + 1, t0 + 1, t1 + 1))
+
+    return verts, faces
 
 
 # -----------------------------------------------------------------------------
@@ -464,11 +536,22 @@ def compute_limb_segments_2d(landmarks_2d: np.ndarray) -> List[LimbSegment2D]:
         "right_calf": (LMS.RIGHT_KNEE, LMS.RIGHT_ANKLE),
     }
     segments: List[LimbSegment2D] = []
+    thickness_scale = {
+        "left_thigh": 0.28,
+        "right_thigh": 0.28,
+        "left_calf": 0.18,
+        "right_calf": 0.18,
+        "left_upper_arm": 0.18,
+        "right_upper_arm": 0.18,
+        "left_forearm": 0.12,
+        "right_forearm": 0.12,
+    }
     for name, (a_idx, b_idx) in limb_pairs.items():
         start = landmarks_2d[a_idx.value, :2]
         end = landmarks_2d[b_idx.value, :2]
         length = np.linalg.norm(end - start)
-        thickness = max(length * 0.12, 3.0)
+        scale = thickness_scale.get(name, 0.15)
+        thickness = max(length * scale, 8.0)
         segments.append(LimbSegment2D(name, start, end, thickness))
     return segments
 
@@ -499,16 +582,101 @@ def draw_structure_overlay(
         cv2.line(overlay, tuple(corners[0]), tuple(corners[2]), color, 1, cv2.LINE_AA)
         cv2.line(overlay, tuple(corners[1]), tuple(corners[3]), color, 1, cv2.LINE_AA)
 
-    limb_color = (60, 255, 120)
     for limb in limbs_2d:
-        start = tuple(np.round(limb.start).astype(int))
-        end = tuple(np.round(limb.end).astype(int))
-        cv2.line(
+        shading = float(np.clip(limb.thickness / 45.0, 0.25, 0.85))
+        overlay = _draw_capsule(
             overlay,
-            start,
-            end,
-            limb_color,
-            int(max(2, limb.thickness)),
-            cv2.LINE_AA,
+            limb.start,
+            limb.end,
+            limb.thickness * 0.5,
+            fill_color=(120, 255, 180),
+            outline_color=(20, 140, 80),
+            shading_strength=shading,
         )
     return overlay
+
+
+def _draw_capsule(
+    image: np.ndarray,
+    start: np.ndarray,
+    end: np.ndarray,
+    radius: float,
+    fill_color: Tuple[int, int, int],
+    outline_color: Tuple[int, int, int],
+    shading_strength: float,
+) -> np.ndarray:
+    img = image.copy()
+    start_pt = np.asarray(start, dtype=np.float32)
+    end_pt = np.asarray(end, dtype=np.float32)
+    diff = end_pt - start_pt
+    length = np.linalg.norm(diff)
+    if length < 1e-3:
+        center = tuple(np.round(start_pt).astype(int))
+        cv2.circle(img, center, int(radius), fill_color, -1, cv2.LINE_AA)
+        cv2.circle(img, center, int(radius), outline_color, 2, cv2.LINE_AA)
+        return img
+
+    direction = diff / length
+    normal = np.array([-direction[1], direction[0]], dtype=np.float32)
+    corner_offset = normal * radius
+    pts = np.array(
+        [
+            start_pt + corner_offset,
+            end_pt + corner_offset,
+            end_pt - corner_offset,
+            start_pt - corner_offset,
+        ],
+        dtype=np.int32,
+    )
+
+    cv2.fillConvexPoly(img, pts, fill_color, cv2.LINE_AA)
+    cv2.circle(img, tuple(np.round(start_pt).astype(int)), int(radius), fill_color, -1, cv2.LINE_AA)
+    cv2.circle(img, tuple(np.round(end_pt).astype(int)), int(radius), fill_color, -1, cv2.LINE_AA)
+
+    cv2.polylines(img, [pts], True, outline_color, 2, cv2.LINE_AA)
+    cv2.circle(img, tuple(np.round(start_pt).astype(int)), int(radius), outline_color, 2, cv2.LINE_AA)
+    cv2.circle(img, tuple(np.round(end_pt).astype(int)), int(radius), outline_color, 2, cv2.LINE_AA)
+
+    # add highlight and shadow bands to imply cylindrical volume
+    highlight_offset = normal * radius * (0.55 * shading_strength)
+    highlight_pts = np.array(
+        [
+            start_pt + highlight_offset * 0.75,
+            end_pt + highlight_offset * 0.75,
+            end_pt + highlight_offset * 0.25,
+            start_pt + highlight_offset * 0.25,
+        ],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(
+        img,
+        highlight_pts,
+        _adjust_color(fill_color, int(120 * shading_strength)),
+        cv2.LINE_AA,
+    )
+
+    shadow_offset = -normal * radius * (0.6 * shading_strength)
+    shadow_pts = np.array(
+        [
+            start_pt + shadow_offset * 0.85,
+            end_pt + shadow_offset * 0.85,
+            end_pt + shadow_offset * 0.25,
+            start_pt + shadow_offset * 0.25,
+        ],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(
+        img,
+        shadow_pts,
+        _adjust_color(fill_color, int(-140 * shading_strength)),
+        cv2.LINE_AA,
+    )
+
+    return img
+
+
+def _adjust_color(color: Tuple[int, int, int], delta: int) -> Tuple[int, int, int]:
+    r = int(np.clip(color[0] + delta, 0, 255))
+    g = int(np.clip(color[1] + delta, 0, 255))
+    b = int(np.clip(color[2] + delta, 0, 255))
+    return (r, g, b)
