@@ -5,6 +5,7 @@ Create a combined overlay showing labeled landmarks and coarse structure primiti
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import mediapipe as mp
@@ -18,7 +19,12 @@ from pose_utils import (
     draw_structure_overlay,
     run_pose_estimation,
 )
-from structure_renderer import composite_overlay, render_structure_overlay
+from structure_renderer import (
+    AlignedStructure,
+    composite_overlay,
+    render_structure_overlay,
+    serialize_box_info,
+)
 
 
 LMS = mp.solutions.pose.PoseLandmark
@@ -41,6 +47,12 @@ def parse_args() -> argparse.Namespace:
         default=Path("structure_overlay_3d.png"),
         help="Output image path for the pyrender overlay.",
     )
+    parser.add_argument(
+        "--coords-output",
+        type=Path,
+        default=Path("structure_boxes_3d.json"),
+        help="Path to write 3D box coordinates (pelvis & ribcage).",
+    )
     return parser.parse_args()
 
 
@@ -48,8 +60,6 @@ def main() -> None:
     args = parse_args()
     image, k2d, k3d = run_pose_estimation(args.image)
 
-    boxes = compute_oriented_boxes(k3d)
-    limbs = compute_limb_segments(k3d)
     boxes_2d = compute_oriented_boxes_2d(k2d)
     limbs_2d = compute_limb_segments_2d(k2d)
 
@@ -67,7 +77,7 @@ def main() -> None:
         (LMS.NOSE, "nose"),
     ]
 
-    overlay_rgba = render_structure_overlay(image, k2d, k3d, boxes, limbs)
+    overlay_rgba, struct_info = render_structure_overlay(image, k2d, k3d)
     combined_3d = composite_overlay(image, overlay_rgba)
     combined_3d = draw_landmark_labels(combined_3d, k2d, key_labels)
 
@@ -80,8 +90,17 @@ def main() -> None:
 
     cv2.imwrite(str(args.output), combined_2d)
     cv2.imwrite(str(args.output_3d), combined_3d)
+    if args.coords_output:
+        _write_box_coords(struct_info, args.coords_output)
     print(f"Saved 2D overlay to {args.output}")
     print(f"Saved 3D overlay to {args.output_3d}")
+    if args.coords_output:
+        print(f"Wrote 3D box coordinates to {args.coords_output}")
+
+
+def _write_box_coords(struct_info: AlignedStructure, path: Path) -> None:
+    data = serialize_box_info(struct_info)
+    path.write_text(json.dumps(data, indent=2))
 
 
 if __name__ == "__main__":

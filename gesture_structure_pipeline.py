@@ -5,6 +5,7 @@ Legacy convenience script that still runs the full pipeline end-to-end.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import cv2
@@ -25,7 +26,7 @@ from pose_utils import (
     run_pose_estimation,
     smooth_curve,
 )
-from structure_renderer import composite_overlay, render_structure_overlay
+from structure_renderer import composite_overlay, render_structure_overlay, serialize_box_info
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,12 +87,15 @@ def main() -> None:
         landmarks_3d=k3d,
     )
 
-    overlay_rgba = render_structure_overlay(image, k2d, k3d, boxes, limbs)
+    overlay_rgba, struct_info = render_structure_overlay(image, k2d, k3d)
     structure_overlay_3d = composite_overlay(image, overlay_rgba)
     structure_overlay_3d = draw_landmark_labels(structure_overlay_3d, k2d, key_labels)
     cv2.imwrite(
         str(args.output_dir / "structure_overlay_3d.png"), structure_overlay_3d
     )
+
+    coords_path = args.output_dir / "structure_boxes_3d.json"
+    coords_path.write_text(json.dumps(serialize_box_info(struct_info), indent=2))
 
     structure_overlay_2d = draw_landmark_labels(image.copy(), k2d, key_labels)
     boxes_2d = compute_oriented_boxes_2d(k2d)

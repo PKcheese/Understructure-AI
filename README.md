@@ -49,10 +49,11 @@ Exports `structure.json`, `structure.obj`, and (optionally) the raw `landmarks.n
 python overlay_landmarks_structure.py \
   --image input.jpg \
   --output outputs/structure_overlay_2d.png \
-  --output-3d outputs/structure_overlay_3d.png
+  --output-3d outputs/structure_overlay_3d.png \
+  --coords-output outputs/structure_boxes_3d.json
 ```
 
-Creates both annotated renders: the original 2D capsule/box overlay (`structure_overlay_2d.png`) plus the pyrender/trimesh shaded rig (`structure_overlay_3d.png`).
+Creates both annotated renders: the original 2D capsule/box overlay (`structure_overlay_2d.png`) plus the pyrender/trimesh shaded rig (`structure_overlay_3d.png`). The accompanying `structure_boxes_3d.json` stores the aligned pelvis and ribcage box coordinates in image space (including transform parameters).
 
 ## Optional: one-shot pipeline
 
@@ -62,7 +63,7 @@ python gesture_structure_pipeline.py \
   --output-dir outputs/full_run
 ```
 
-This now also emits both `structure_overlay_2d.png` (capsule/box overlay) and `structure_overlay_3d.png` (trimesh+pyrender) alongside the earlier gesture/structure exports. The OBJ output uses low-poly cylinders for limbs instead of simple lines.
+This now also emits both `structure_overlay_2d.png` (capsule/box overlay) and `structure_overlay_3d.png` (trimesh+pyrender) alongside the earlier gesture/structure exports, plus `structure_boxes_3d.json` containing the aligned pelvis/ribcage coordinates. The OBJ output uses low-poly cylinders for limbs instead of simple lines.
 
 ## Under the hood
 
