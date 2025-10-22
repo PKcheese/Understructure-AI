@@ -75,6 +75,22 @@ LIMB_JOINT_MAP: Dict[str, Tuple[str, str]] = {
     "right_foot": ("right_ankle", "right_foot"),
 }
 
+
+def _apply_transform_to_metadata(mesh: trimesh.Trimesh, transform: np.ndarray) -> None:
+    metadata = getattr(mesh, "metadata", None)
+    if not metadata:
+        return
+
+    if metadata.get("type") == "box":
+        center = np.array(metadata.get("center", [0.0, 0.0, 0.0]), dtype=np.float32)
+        axes = np.array(metadata.get("axes", np.eye(3)), dtype=np.float32)
+        rot = transform[:3, :3]
+        trans = transform[:3, 3]
+        center = rot @ center + trans
+        axes = rot @ axes
+        metadata["center"] = center.tolist()
+        metadata["axes"] = axes.tolist()
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render a 3D construction rig and export a mesh + screenshot."
@@ -188,6 +204,7 @@ def main() -> None:
     if alignment is not None:
         for mesh in meshes:
             mesh.apply_transform(alignment)
+            _apply_transform_to_metadata(mesh, alignment)
 
     combined = trimesh.util.concatenate(meshes)
     combined.visual.vertex_colors = np.vstack([mesh.visual.vertex_colors for mesh in meshes])
