@@ -90,6 +90,15 @@ def _apply_transform_to_metadata(mesh: trimesh.Trimesh, transform: np.ndarray) -
         axes = rot @ axes
         metadata["center"] = center.tolist()
         metadata["axes"] = axes.tolist()
+    elif metadata.get("type") == "limb_segment":
+        rot = transform[:3, :3]
+        trans = transform[:3, 3]
+        if "start" in metadata:
+            start = np.array(metadata["start"], dtype=np.float32)
+            metadata["start"] = (rot @ start + trans).tolist()
+        if "end" in metadata:
+            end = np.array(metadata["end"], dtype=np.float32)
+            metadata["end"] = (rot @ end + trans).tolist()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -291,7 +300,13 @@ def _build_meshes(
         category = "arm" if "arm" in limb.name else "leg"
         color = CYLINDER_COLORS.get(category, (180, 180, 180, 255))
         cylinder.visual.vertex_colors = np.tile(np.array(color, dtype=np.uint8), (cylinder.vertices.shape[0], 1))
-        cylinder.metadata = {"type": "limb_segment", "name": limb.name}
+        cylinder.metadata = {
+            "type": "limb_segment",
+            "name": limb.name,
+            "start": start.tolist(),
+            "end": end.tolist(),
+            "radius": float(radius),
+        }
         meshes.append(cylinder)
 
         joint_labels = LIMB_JOINT_MAP.get(limb.name, ("", ""))
@@ -714,6 +729,17 @@ def _clone_meshes_with_modifications(
     target_joints = {"left_shoulder", "right_shoulder", "left_knee", "right_knee"}
     joint_color = np.array([215, 40, 40, 255], dtype=np.uint8)
     outline_color = np.array([15, 15, 15, 255], dtype=np.uint8)
+    spine_points: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    ring_segments = {
+        "left_upper_arm",
+        "left_forearm",
+        "right_upper_arm",
+        "right_forearm",
+        "left_thigh",
+        "left_calf",
+        "right_thigh",
+        "right_calf",
+    }
 
     for mesh in meshes:
         new_mesh = mesh.copy()
@@ -735,10 +761,36 @@ def _clone_meshes_with_modifications(
             center_line = _center_line_mesh(new_mesh, joint_color)
             if center_line is not None:
                 modified.append(center_line)
+            band = _box_mid_band_mesh(new_mesh, joint_color)
+            if band is not None:
+                modified.append(band)
+            center = np.array(new_mesh.metadata.get("center", [0.0, 0.0, 0.0]), dtype=np.float32)
+            size = np.array(new_mesh.metadata.get("size", [0.1, 0.1, 0.1]), dtype=np.float32)
+            spine_points[metadata["name"]] = (center, size)
         if metadata.get("type") == "box" and metadata.get("name") == "head":
             center_line = _center_line_mesh(new_mesh, joint_color)
             if center_line is not None:
                 modified.append(center_line)
+            band = _box_mid_band_mesh(new_mesh, joint_color)
+            if band is not None:
+                modified.append(band)
+            center = np.array(new_mesh.metadata.get("center", [0.0, 0.0, 0.0]), dtype=np.float32)
+            size = np.array(new_mesh.metadata.get("size", [0.1, 0.1, 0.1]), dtype=np.float32)
+            spine_points[metadata["name"]] = (center, size)
+
+        if metadata.get("type") == "limb_segment" and metadata.get("name") in ring_segments:
+            ring = _limb_ring_mesh(metadata, outline_color)
+            if ring is not None:
+                modified.append(ring)
+
+    spine_order = ["pelvis", "ribcage", "head"]
+    spine_centers = [spine_points[name][0] for name in spine_order if name in spine_points]
+    if len(spine_centers) >= 2:
+        avg_size = np.mean([np.linalg.norm(spine_points[name][1]) for name in spine_order if name in spine_points])
+        spine_radius = max(avg_size * 0.04, 0.01)
+        spine_mesh = _spine_mesh(spine_centers, spine_radius, joint_color)
+        if spine_mesh is not None:
+            modified.append(spine_mesh)
 
     return modified
 
@@ -856,13 +908,93 @@ def _center_line_mesh(box_mesh: trimesh.Trimesh, color: np.ndarray) -> trimesh.T
     length = np.linalg.norm(vec)
     if length < 1e-6:
         return None
-    radius = np.max(size) * 0.015
+    radius = np.max(size) * 0.02
     cyl = trimesh.creation.cylinder(radius=radius, height=length, sections=16)
     align = trimesh.geometry.align_vectors([0, 0, 1], vec / length)
     cyl.apply_transform(align)
     cyl.apply_translation((start + end) * 0.5)
     cyl.visual.vertex_colors = np.tile(color, (cyl.vertices.shape[0], 1))
     return cyl
+
+
+def _box_mid_band_mesh(box_mesh: trimesh.Trimesh, color: np.ndarray) -> trimesh.Trimesh | None:
+    meta = getattr(box_mesh, "metadata", {}) or {}
+    axes = (
+        np.array(meta.get("axes"), dtype=np.float32) if "axes" in meta else None
+    )
+    size = (
+        np.array(meta.get("size"), dtype=np.float32) if "size" in meta else None
+    )
+    center = (
+        np.array(meta.get("center"), dtype=np.float32) if "center" in meta else None
+    )
+    if axes is None or size is None or center is None:
+        return None
+
+    half = size / 2.0
+    local_points = []
+    for sy, sz in [(-1, -1), (-1, 1), (1, 1), (1, -1)]:
+        local_points.append(np.array([0.0, sy * half[1], sz * half[2]], dtype=np.float32))
+    world_points = [center + axes @ lp for lp in local_points]
+
+    radius = np.max(size) * 0.02
+    segments: List[trimesh.Trimesh] = []
+    for a, b in zip(world_points, world_points[1:] + world_points[:1]):
+        vec = b - a
+        length = np.linalg.norm(vec)
+        if length < 1e-6:
+            continue
+        cyl = trimesh.creation.cylinder(radius=radius, height=length, sections=16)
+        align = trimesh.geometry.align_vectors([0, 0, 1], vec / length)
+        cyl.apply_transform(align)
+        cyl.apply_translation((a + b) * 0.5)
+        cyl.visual.vertex_colors = np.tile(color, (cyl.vertices.shape[0], 1))
+        segments.append(cyl)
+
+    if not segments:
+        return None
+    return trimesh.util.concatenate(segments)
+
+
+def _limb_ring_mesh(metadata: Dict, color: np.ndarray) -> trimesh.Trimesh | None:
+    start = np.array(metadata.get("start", [0.0, 0.0, 0.0]), dtype=np.float32)
+    end = np.array(metadata.get("end", [0.0, 0.0, 0.0]), dtype=np.float32)
+    radius = float(metadata.get("radius", 0.0))
+    vec = end - start
+    length = np.linalg.norm(vec)
+    if length < 1e-6 or radius <= 0.0:
+        return None
+
+    mid = (start + end) * 0.5
+    direction = vec / length
+    ring_radius = radius * 1.02
+    thickness = max(radius * 0.2, 0.01)
+    ring = trimesh.creation.cylinder(radius=ring_radius, height=thickness, sections=32)
+    align = trimesh.geometry.align_vectors([0, 0, 1], direction)
+    ring.apply_transform(align)
+    ring.apply_translation(mid)
+    ring.visual.vertex_colors = np.tile(color, (ring.vertices.shape[0], 1))
+    return ring
+
+
+def _spine_mesh(points: Sequence[np.ndarray], radius: float, color: np.ndarray) -> trimesh.Trimesh | None:
+    if len(points) < 2:
+        return None
+    segments: List[trimesh.Trimesh] = []
+    for a, b in zip(points, points[1:]):
+        vec = b - a
+        length = np.linalg.norm(vec)
+        if length < 1e-6:
+            continue
+        cyl = trimesh.creation.cylinder(radius=radius, height=length, sections=24)
+        align = trimesh.geometry.align_vectors([0, 0, 1], vec / length)
+        cyl.apply_transform(align)
+        cyl.apply_translation((a + b) * 0.5)
+        cyl.visual.vertex_colors = np.tile(color, (cyl.vertices.shape[0], 1))
+        segments.append(cyl)
+    if not segments:
+        return None
+    return trimesh.util.concatenate(segments)
 
 
 if __name__ == "__main__":
