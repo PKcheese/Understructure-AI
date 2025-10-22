@@ -9,11 +9,11 @@ import json
 from pathlib import Path
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from pose_utils import (
     build_gesture_curves,
+    compute_label_offsets,
     compute_limb_segments,
     compute_limb_segments_2d,
     compute_oriented_boxes,
@@ -23,6 +23,7 @@ from pose_utils import (
     draw_structure_overlay,
     export_structure_json,
     export_structure_obj,
+    priority_landmarks,
     run_pose_estimation,
     smooth_curve,
 )
@@ -64,19 +65,7 @@ def main() -> None:
 
     boxes = compute_oriented_boxes(k3d)
     limbs = compute_limb_segments(k3d)
-    key_labels = [
-        (mp.solutions.pose.PoseLandmark.LEFT_HIP, "left hip"),
-        (mp.solutions.pose.PoseLandmark.RIGHT_HIP, "right hip"),
-        (mp.solutions.pose.PoseLandmark.LEFT_SHOULDER, "left shoulder"),
-        (mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER, "right shoulder"),
-        (mp.solutions.pose.PoseLandmark.LEFT_ELBOW, "left elbow"),
-        (mp.solutions.pose.PoseLandmark.RIGHT_ELBOW, "right elbow"),
-        (mp.solutions.pose.PoseLandmark.LEFT_KNEE, "left knee"),
-        (mp.solutions.pose.PoseLandmark.RIGHT_KNEE, "right knee"),
-        (mp.solutions.pose.PoseLandmark.LEFT_ANKLE, "left ankle"),
-        (mp.solutions.pose.PoseLandmark.RIGHT_ANKLE, "right ankle"),
-        (mp.solutions.pose.PoseLandmark.NOSE, "nose"),
-    ]
+    key_labels = priority_landmarks()
 
     cv2.imwrite(str(args.output_dir / "gesture_overlay.png"), gesture_img)
     export_structure_json(boxes, limbs, args.output_dir / "structure.json")
@@ -88,8 +77,16 @@ def main() -> None:
     )
 
     overlay_rgba, struct_info = render_structure_overlay(image, k2d, k3d)
+    offsets = compute_label_offsets(image.shape)
     structure_overlay_3d = composite_overlay(image, overlay_rgba)
-    structure_overlay_3d = draw_landmark_labels(structure_overlay_3d, k2d, key_labels)
+    structure_overlay_3d = draw_landmark_labels(
+        structure_overlay_3d,
+        k2d,
+        key_labels,
+        label_offsets=offsets,
+        draw_arrows=False,
+        draw_text=False,
+    )
     cv2.imwrite(
         str(args.output_dir / "structure_overlay_3d.png"), structure_overlay_3d
     )
@@ -97,7 +94,14 @@ def main() -> None:
     coords_path = args.output_dir / "structure_boxes_3d.json"
     coords_path.write_text(json.dumps(serialize_box_info(struct_info), indent=2))
 
-    structure_overlay_2d = draw_landmark_labels(image.copy(), k2d, key_labels)
+    structure_overlay_2d = draw_landmark_labels(
+        image.copy(),
+        k2d,
+        key_labels,
+        label_offsets=offsets,
+        draw_arrows=False,
+        draw_text=False,
+    )
     boxes_2d = compute_oriented_boxes_2d(k2d)
     limbs_2d = compute_limb_segments_2d(k2d)
     structure_overlay_2d = draw_structure_overlay(

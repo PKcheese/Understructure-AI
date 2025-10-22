@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import mediapipe as mp
@@ -16,6 +16,44 @@ import numpy as np
 
 
 LMS = mp.solutions.pose.PoseLandmark
+
+_LABEL_OFFSET_FRACTIONS: Dict[LMS, Tuple[float, float]] = {
+    LMS.NOSE: (0.0, -0.08),
+    LMS.LEFT_EYE_OUTER: (-0.06, -0.06),
+    LMS.RIGHT_EYE_OUTER: (0.06, -0.06),
+    LMS.LEFT_EAR: (-0.1, -0.03),
+    LMS.RIGHT_EAR: (0.1, -0.03),
+    LMS.LEFT_SHOULDER: (-0.12, -0.02),
+    LMS.RIGHT_SHOULDER: (0.12, -0.02),
+    LMS.LEFT_ELBOW: (-0.14, 0.02),
+    LMS.RIGHT_ELBOW: (0.14, 0.02),
+    LMS.LEFT_WRIST: (-0.12, 0.05),
+    LMS.RIGHT_WRIST: (0.12, 0.05),
+    LMS.LEFT_THUMB: (-0.08, 0.08),
+    LMS.RIGHT_THUMB: (0.08, 0.08),
+    LMS.LEFT_INDEX: (-0.04, -0.08),
+    LMS.RIGHT_INDEX: (0.04, -0.08),
+    LMS.LEFT_PINKY: (-0.12, -0.05),
+    LMS.RIGHT_PINKY: (0.12, -0.05),
+    LMS.LEFT_HIP: (-0.1, 0.02),
+    LMS.RIGHT_HIP: (0.1, 0.02),
+    LMS.LEFT_KNEE: (-0.09, 0.05),
+    LMS.RIGHT_KNEE: (0.09, 0.05),
+    LMS.LEFT_ANKLE: (-0.08, 0.06),
+    LMS.RIGHT_ANKLE: (0.08, 0.06),
+    LMS.LEFT_HEEL: (-0.1, 0.08),
+    LMS.RIGHT_HEEL: (0.1, 0.08),
+    LMS.LEFT_FOOT_INDEX: (-0.06, 0.02),
+    LMS.RIGHT_FOOT_INDEX: (0.06, 0.02),
+}
+
+
+def compute_label_offsets(image_shape: Tuple[int, int]) -> Dict[LMS, Tuple[int, int]]:
+    h, w = image_shape[:2]
+    offsets: Dict[LMS, Tuple[int, int]] = {}
+    for key, (fx, fy) in _LABEL_OFFSET_FRACTIONS.items():
+        offsets[key] = (int(fx * w), int(fy * h))
+    return offsets
 
 
 # -----------------------------------------------------------------------------
@@ -116,26 +154,50 @@ def draw_landmark_labels(
     landmark_names: Sequence[Tuple[LMS, str]],
     radius: int = 6,
     font_scale: float = 0.5,
+    label_offsets: Optional[Dict[LMS, Tuple[int, int]]] = None,
+    draw_arrows: bool = False,
+    arrow_color: Tuple[int, int, int] = (240, 240, 240),
+    draw_text: bool = True,
 ) -> np.ndarray:
     """Draw selected landmarks with labels on an image copy."""
     annotated = image.copy()
+    h, w = image.shape[:2]
+    offsets = label_offsets or {}
     for enum_member, label in landmark_names:
         idx = enum_member.value
         x, y, visibility = landmarks_2d[idx]
         if visibility < 0.2:
             continue
-        center = (int(round(x)), int(round(y)))
-        cv2.circle(annotated, center, radius, (0, 80, 255), -1, cv2.LINE_AA)
-        cv2.putText(
-            annotated,
-            label,
-            (center[0] + radius + 2, center[1] - radius),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            font_scale,
-            (255, 255, 255),
-            thickness=1,
-            lineType=cv2.LINE_AA,
-        )
+        center = np.array([int(round(x)), int(round(y))])
+        cv2.circle(annotated, tuple(center), radius, (0, 80, 255), -1, cv2.LINE_AA)
+
+        if draw_text:
+            dx, dy = offsets.get(enum_member, (0, -int(0.04 * h)))
+            target = np.array([center[0] + dx, center[1] + dy])
+            target[0] = int(np.clip(target[0], 0, w - 1))
+            target[1] = int(np.clip(target[1], 0, h - 1))
+
+            if draw_arrows:
+                cv2.arrowedLine(
+                    annotated,
+                    tuple(center),
+                    tuple(target),
+                    arrow_color,
+                    thickness=1,
+                    tipLength=0.25,
+                )
+
+            text_org = (target[0], target[1])
+            cv2.putText(
+                annotated,
+                label,
+                text_org,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (255, 255, 255),
+                thickness=1,
+                lineType=cv2.LINE_AA,
+            )
     return annotated
 
 
@@ -267,19 +329,25 @@ def compute_oriented_boxes(landmarks_3d: np.ndarray) -> List[OrientedBox]:
     )
     pelvis = OrientedBox("pelvis", hip_center, pelvis_axes, pelvis_size)
 
-    ribcage_center = hip_center + spine_dir * 0.6
-    ribcage_axes = _frame_from_direction(rshoulder - lshoulder, nose - ribcage_center)
+    ribcage_axis_x = _normalize(rshoulder - lshoulder)
+    ribcage_axis_y = _normalize(hip_center - shoulder_center)
+    ribcage_axis_z = _normalize(np.cross(ribcage_axis_x, ribcage_axis_y))
+    ribcage_axis_y = _normalize(np.cross(ribcage_axis_z, ribcage_axis_x))
+    ribcage_axes = np.stack([ribcage_axis_x, ribcage_axis_y, ribcage_axis_z], axis=1)
+    shoulder_to_hip = np.linalg.norm(shoulder_center - hip_center)
+    ribcage_height = shoulder_to_hip * 0.65
+    ribcage_center = shoulder_center + ribcage_axis_y * (ribcage_height * 0.25)
     ribcage_size = (
-        max(shoulder_width * 1.15, 1e-3),
-        max(torso_height * 0.65, 1e-3),
-        max(shoulder_width * 0.75, 1e-3),
+        max(shoulder_width * 0.85, 1e-3),
+        max(ribcage_height * 0.8, 1e-3),
+        max(shoulder_width * 0.45, 1e-3),
     )
     ribcage = OrientedBox("ribcage", ribcage_center, ribcage_axes, ribcage_size)
 
-    head_center = nose + (nose - ribcage_center) * 0.2
+    head_center = nose + (nose - shoulder_center) * 0.2
     ear_width = np.linalg.norm(right_ear - left_ear) if np.any(right_ear) else shoulder_width * 0.4
     head_height = torso_height * 0.35 if torso_height > 1e-3 else hip_width * 0.8
-    head_axes = _frame_from_direction(right_ear - left_ear, nose - ribcage_center)
+    head_axes = _frame_from_direction(right_ear - left_ear, nose - shoulder_center)
     head_size = (
         max(ear_width * 1.1, 1e-3),
         max(head_height, 1e-3),
@@ -321,6 +389,38 @@ def compute_limb_segments(landmarks_3d: np.ndarray) -> List[LimbSegment]:
         radius = max(length * scale, 1e-3)
         segments.append(LimbSegment(name, start, end, radius))
     return segments
+
+
+def priority_landmarks() -> List[Tuple[LMS, str]]:
+    return [
+        (LMS.NOSE, "nose"),
+        (LMS.LEFT_EYE_OUTER, "left eye"),
+        (LMS.RIGHT_EYE_OUTER, "right eye"),
+        (LMS.LEFT_EAR, "left ear"),
+        (LMS.RIGHT_EAR, "right ear"),
+        (LMS.LEFT_SHOULDER, "left shoulder"),
+        (LMS.RIGHT_SHOULDER, "right shoulder"),
+        (LMS.LEFT_ELBOW, "left elbow"),
+        (LMS.RIGHT_ELBOW, "right elbow"),
+        (LMS.LEFT_WRIST, "left wrist"),
+        (LMS.RIGHT_WRIST, "right wrist"),
+        (LMS.LEFT_THUMB, "left thumb"),
+        (LMS.RIGHT_THUMB, "right thumb"),
+        (LMS.LEFT_INDEX, "left index"),
+        (LMS.RIGHT_INDEX, "right index"),
+        (LMS.LEFT_PINKY, "left pinky"),
+        (LMS.RIGHT_PINKY, "right pinky"),
+        (LMS.LEFT_HIP, "left hip"),
+        (LMS.RIGHT_HIP, "right hip"),
+        (LMS.LEFT_KNEE, "left knee"),
+        (LMS.RIGHT_KNEE, "right knee"),
+        (LMS.LEFT_ANKLE, "left ankle"),
+        (LMS.RIGHT_ANKLE, "right ankle"),
+        (LMS.LEFT_HEEL, "left heel"),
+        (LMS.RIGHT_HEEL, "right heel"),
+        (LMS.LEFT_FOOT_INDEX, "left toes"),
+        (LMS.RIGHT_FOOT_INDEX, "right toes"),
+    ]
 
 
 def export_structure_json(
@@ -501,20 +601,25 @@ def compute_oriented_boxes_2d(landmarks_2d: np.ndarray) -> List[OrientedBox2D]:
     )
     pelvis = OrientedBox2D("pelvis", hip_center, pelvis_axes, pelvis_size)
 
-    ribcage_center = hip_center + spine_dir * 0.6
-    ribcage_axes = _frame2d(rshoulder - lshoulder, nose - ribcage_center)
+    ribcage_axis_x = _normalize(rshoulder - lshoulder)
+    ribcage_axis_y = _normalize(hip_center - shoulder_center)
+    if np.linalg.norm(ribcage_axis_y) < 1e-6:
+        ribcage_axis_y = np.array([-ribcage_axis_x[1], ribcage_axis_x[0]], dtype=np.float32)
+    ribcage_axes = np.stack([ribcage_axis_x, ribcage_axis_y], axis=1)
+    ribcage_height = np.linalg.norm(shoulder_center - hip_center) * 1.05
+    ribcage_center = shoulder_center + ribcage_axis_y * (ribcage_height * 0.5)
     ribcage_size = (
         max(shoulder_width * 1.15, 1e-3),
-        max(torso_height * 0.65, 1e-3),
+        max(ribcage_height, 1e-3),
     )
     ribcage = OrientedBox2D("ribcage", ribcage_center, ribcage_axes, ribcage_size)
 
-    head_center = nose + (nose - ribcage_center) * 0.2
+    head_center = nose + (nose - shoulder_center) * 0.2
     ear_width = np.linalg.norm(right_ear - left_ear)
     if not np.isfinite(ear_width) or ear_width < 1e-3:
         ear_width = shoulder_width * 0.4
     head_height = torso_height * 0.35 if torso_height > 1e-3 else hip_width * 0.8
-    head_axes = _frame2d(right_ear - left_ear, nose - ribcage_center)
+    head_axes = _frame2d(right_ear - left_ear, nose - shoulder_center)
     head_size = (
         max(ear_width * 1.1, 1e-3),
         max(head_height, 1e-3),
@@ -567,7 +672,14 @@ def draw_structure_overlay(
     overlay = image.copy()
 
     if label_landmarks and landmark_names:
-        overlay = draw_landmark_labels(overlay, landmarks_2d, landmark_names)
+        offsets = compute_label_offsets(image.shape)
+        overlay = draw_landmark_labels(
+            overlay,
+            landmarks_2d,
+            landmark_names,
+            label_offsets=offsets,
+            draw_arrows=True,
+        )
 
     box_colors = {
         "pelvis": (255, 120, 0),

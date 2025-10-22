@@ -8,15 +8,15 @@ import argparse
 import json
 from pathlib import Path
 
-import mediapipe as mp
-
 from pose_utils import (
+    compute_label_offsets,
     compute_limb_segments,
     compute_limb_segments_2d,
     compute_oriented_boxes,
     compute_oriented_boxes_2d,
     draw_landmark_labels,
     draw_structure_overlay,
+    priority_landmarks,
     run_pose_estimation,
 )
 from structure_renderer import (
@@ -25,9 +25,6 @@ from structure_renderer import (
     render_structure_overlay,
     serialize_box_info,
 )
-
-
-LMS = mp.solutions.pose.PoseLandmark
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,25 +60,28 @@ def main() -> None:
     boxes_2d = compute_oriented_boxes_2d(k2d)
     limbs_2d = compute_limb_segments_2d(k2d)
 
-    key_labels = [
-        (LMS.LEFT_HIP, "left hip"),
-        (LMS.RIGHT_HIP, "right hip"),
-        (LMS.LEFT_SHOULDER, "left shoulder"),
-        (LMS.RIGHT_SHOULDER, "right shoulder"),
-        (LMS.LEFT_ELBOW, "left elbow"),
-        (LMS.RIGHT_ELBOW, "right elbow"),
-        (LMS.LEFT_KNEE, "left knee"),
-        (LMS.RIGHT_KNEE, "right knee"),
-        (LMS.LEFT_ANKLE, "left ankle"),
-        (LMS.RIGHT_ANKLE, "right ankle"),
-        (LMS.NOSE, "nose"),
-    ]
+    key_labels = priority_landmarks()
 
     overlay_rgba, struct_info = render_structure_overlay(image, k2d, k3d)
+    offsets = compute_label_offsets(image.shape)
     combined_3d = composite_overlay(image, overlay_rgba)
-    combined_3d = draw_landmark_labels(combined_3d, k2d, key_labels)
+    combined_3d = draw_landmark_labels(
+        combined_3d,
+        k2d,
+        key_labels,
+        label_offsets=offsets,
+        draw_arrows=False,
+        draw_text=False,
+    )
 
-    combined_2d = draw_landmark_labels(image.copy(), k2d, key_labels)
+    combined_2d = draw_landmark_labels(
+        image.copy(),
+        k2d,
+        key_labels,
+        label_offsets=offsets,
+        draw_arrows=False,
+        draw_text=False,
+    )
     combined_2d = draw_structure_overlay(
         combined_2d, boxes_2d, limbs_2d, k2d, label_landmarks=False
     )

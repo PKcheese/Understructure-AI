@@ -65,6 +65,16 @@ python gesture_structure_pipeline.py \
 
 This now also emits both `structure_overlay_2d.png` (capsule/box overlay) and `structure_overlay_3d.png` (trimesh+pyrender) alongside the earlier gesture/structure exports, plus `structure_boxes_3d.json` containing the aligned pelvis/ribcage coordinates. The OBJ output uses low-poly cylinders for limbs instead of simple lines.
 
+### Compare multiple 3D styles
+
+```bash
+python generate_3d_variants.py \
+  --image input.jpg \
+  --output-dir outputs/variants
+```
+
+Writes `structure_overlay_3d_output1.png` (painterly), `structure_overlay_3d_output2.png` (solid), and `structure_overlay_3d_output3.png` (sketch) so you can pick the foreshortening/occlusion treatment that works best.
+
 ## Under the hood
 
 1. [MediaPipe Pose](https://developers.google.com/mediapipe/solutions/vision/pose) extracts 33 landmarks in image and “world” coordinates.

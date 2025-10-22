@@ -1,350 +1,363 @@
 """
-Render gesture structure primitives using trimesh + pyrender for shaded overlays.
+Stylized 3D-ish overlay construction rendered directly in 2D.
+
+The goal is to mimic construction maquettes (boxes + cylinders) with clear
+occlusion, foreshortening cues, and distinct silhouettes, similar to gesture /
+structure drawing references.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import cv2
 import numpy as np
-import pyrender
-import trimesh
 
-from pose_utils import LimbSegment, OrientedBox
+from pose_utils import LMS, compute_oriented_boxes
 
 
-CV_TO_GL = np.diag([1.0, -1.0, -1.0, 1.0])
-CV_TO_GL_3 = CV_TO_GL[:3, :3]
+def _bgr(r: int, g: int, b: int) -> Tuple[int, int, int]:
+    return (b, g, r)
 
 
-@dataclass
-class AlignedStructure:
-    landmarks: np.ndarray
-    boxes: Sequence[OrientedBox]
-    limbs: Sequence[LimbSegment]
-    rotation: np.ndarray
-    scale: float
-    translation_xy: np.ndarray
-    origin_3d: np.ndarray
+STYLE_PRESETS: Dict[str, Dict] = {
+    "painterly": {
+        "torso": {
+            "fill": _bgr(232, 134, 90),
+            "edge": _bgr(110, 60, 45),
+            "highlight": _bgr(255, 205, 165),
+            "alpha": 215,
+            "bottom_lift": 0.28,
+            "waist_taper": 0.18,
+        },
+        "pelvis": {
+            "fill": _bgr(82, 141, 255),
+            "edge": _bgr(40, 65, 140),
+            "highlight": _bgr(165, 205, 255),
+            "alpha": 215,
+            "length_factor": 0.38,
+            "flare": 0.25,
+        },
+        "head": {
+            "fill": _bgr(250, 178, 150),
+            "edge": _bgr(120, 70, 60),
+            "highlight": _bgr(255, 225, 205),
+            "alpha": 210,
+            "width_scale": 0.55,
+            "height_scale": 1.05,
+        },
+        "limbs": {
+            "highlight_shift": 0.33,
+            "categories": {
+                "arm_upper": {
+                    "fill": _bgr(240, 140, 110),
+                    "highlight": _bgr(255, 205, 180),
+                    "edge": _bgr(110, 55, 40),
+                    "width_scale": 0.32,
+                    "min_thickness": 16,
+                    "alpha": 220,
+                },
+                "arm_lower": {
+                    "fill": _bgr(245, 155, 120),
+                    "highlight": _bgr(255, 215, 190),
+                    "edge": _bgr(125, 60, 45),
+                    "width_scale": 0.27,
+                    "min_thickness": 14,
+                    "alpha": 220,
+                },
+                "hand": {
+                    "fill": _bgr(250, 185, 150),
+                    "highlight": _bgr(255, 228, 200),
+                    "edge": _bgr(140, 70, 55),
+                    "width_scale": 0.22,
+                    "min_thickness": 12,
+                    "alpha": 215,
+                },
+                "leg_upper": {
+                    "fill": _bgr(95, 165, 255),
+                    "highlight": _bgr(170, 210, 255),
+                    "edge": _bgr(35, 70, 150),
+                    "width_scale": 0.36,
+                    "min_thickness": 18,
+                    "alpha": 220,
+                },
+                "leg_lower": {
+                    "fill": _bgr(120, 185, 255),
+                    "highlight": _bgr(190, 225, 255),
+                    "edge": _bgr(40, 75, 150),
+                    "width_scale": 0.30,
+                    "min_thickness": 15,
+                    "alpha": 220,
+                },
+                "foot": {
+                    "fill": _bgr(140, 205, 255),
+                    "highlight": _bgr(210, 235, 255),
+                    "edge": _bgr(50, 85, 155),
+                    "width_scale": 0.26,
+                    "min_thickness": 12,
+                    "alpha": 210,
+                },
+            },
+        },
+    },
+    "solid": {
+        "torso": {
+            "fill": _bgr(210, 125, 60),
+            "edge": _bgr(80, 45, 25),
+            "highlight": _bgr(255, 210, 110),
+            "alpha": 240,
+            "bottom_lift": 0.25,
+            "waist_taper": 0.15,
+        },
+        "pelvis": {
+            "fill": _bgr(70, 110, 230),
+            "edge": _bgr(35, 55, 135),
+            "highlight": _bgr(150, 190, 255),
+            "alpha": 235,
+            "length_factor": 0.34,
+            "flare": 0.20,
+        },
+        "head": {
+            "fill": _bgr(230, 160, 140),
+            "edge": _bgr(105, 55, 45),
+            "highlight": _bgr(255, 225, 195),
+            "alpha": 230,
+            "width_scale": 0.6,
+            "height_scale": 1.0,
+        },
+        "limbs": {
+            "highlight_shift": 0.28,
+            "categories": {
+                "arm_upper": {
+                    "fill": _bgr(220, 120, 70),
+                    "highlight": _bgr(255, 190, 140),
+                    "edge": _bgr(90, 45, 25),
+                    "width_scale": 0.30,
+                    "min_thickness": 18,
+                    "alpha": 235,
+                },
+                "arm_lower": {
+                    "fill": _bgr(230, 140, 90),
+                    "highlight": _bgr(255, 210, 160),
+                    "edge": _bgr(100, 50, 30),
+                    "width_scale": 0.26,
+                    "min_thickness": 16,
+                    "alpha": 235,
+                },
+                "hand": {
+                    "fill": _bgr(240, 170, 130),
+                    "highlight": _bgr(255, 220, 180),
+                    "edge": _bgr(110, 55, 35),
+                    "width_scale": 0.22,
+                    "min_thickness": 12,
+                    "alpha": 225,
+                },
+                "leg_upper": {
+                    "fill": _bgr(80, 135, 245),
+                    "highlight": _bgr(155, 190, 255),
+                    "edge": _bgr(30, 60, 150),
+                    "width_scale": 0.34,
+                    "min_thickness": 20,
+                    "alpha": 235,
+                },
+                "leg_lower": {
+                    "fill": _bgr(100, 160, 250),
+                    "highlight": _bgr(180, 210, 255),
+                    "edge": _bgr(35, 70, 150),
+                    "width_scale": 0.28,
+                    "min_thickness": 16,
+                    "alpha": 235,
+                },
+                "foot": {
+                    "fill": _bgr(120, 175, 255),
+                    "highlight": _bgr(200, 220, 255),
+                    "edge": _bgr(45, 85, 150),
+                    "width_scale": 0.25,
+                    "min_thickness": 12,
+                    "alpha": 225,
+                },
+            },
+        },
+    },
+    "sketch": {
+        "torso": {
+            "fill": _bgr(235, 235, 245),
+            "edge": _bgr(60, 60, 80),
+            "highlight": _bgr(255, 255, 255),
+            "alpha": 190,
+            "bottom_lift": 0.25,
+            "waist_taper": 0.22,
+        },
+        "pelvis": {
+            "fill": _bgr(220, 220, 240),
+            "edge": _bgr(55, 55, 80),
+            "highlight": _bgr(255, 255, 255),
+            "alpha": 185,
+            "length_factor": 0.36,
+            "flare": 0.28,
+        },
+        "head": {
+            "fill": _bgr(240, 240, 250),
+            "edge": _bgr(70, 70, 90),
+            "highlight": _bgr(255, 255, 255),
+            "alpha": 190,
+            "width_scale": 0.58,
+            "height_scale": 1.05,
+        },
+        "limbs": {
+            "highlight_shift": 0.35,
+            "categories": {
+                "arm_upper": {
+                    "fill": _bgr(235, 235, 250),
+                    "highlight": _bgr(255, 255, 255),
+                    "edge": _bgr(70, 70, 90),
+                    "width_scale": 0.30,
+                    "min_thickness": 14,
+                    "alpha": 200,
+                },
+                "arm_lower": {
+                    "fill": _bgr(235, 235, 250),
+                    "highlight": _bgr(255, 255, 255),
+                    "edge": _bgr(70, 70, 90),
+                    "width_scale": 0.25,
+                    "min_thickness": 12,
+                    "alpha": 200,
+                },
+                "hand": {
+                    "fill": _bgr(242, 242, 255),
+                    "highlight": _bgr(255, 255, 255),
+                    "edge": _bgr(80, 80, 95),
+                    "width_scale": 0.20,
+                    "min_thickness": 10,
+                    "alpha": 190,
+                },
+                "leg_upper": {
+                    "fill": _bgr(220, 225, 250),
+                    "highlight": _bgr(245, 245, 255),
+                    "edge": _bgr(60, 65, 90),
+                    "width_scale": 0.32,
+                    "min_thickness": 16,
+                    "alpha": 200,
+                },
+                "leg_lower": {
+                    "fill": _bgr(225, 230, 255),
+                    "highlight": _bgr(245, 245, 255),
+                    "edge": _bgr(60, 65, 90),
+                    "width_scale": 0.27,
+                    "min_thickness": 14,
+                    "alpha": 195,
+                },
+                "foot": {
+                    "fill": _bgr(230, 235, 255),
+                    "highlight": _bgr(255, 255, 255),
+                    "edge": _bgr(70, 75, 95),
+                    "width_scale": 0.22,
+                    "min_thickness": 12,
+                    "alpha": 190,
+                },
+            },
+        },
+    },
+}
 
 
-def _solve_camera(
-    k2d: np.ndarray, k3d: np.ndarray, width: int, height: int
-) -> tuple[pyrender.camera.IntrinsicsCamera, np.ndarray] | None:
-    valid = k2d[:, 2] > 0.4
-    if valid.sum() < 6:
-        return None
-
-    object_points = k3d[valid].astype(np.float32)
-    image_points = k2d[valid, :2].astype(np.float32)
-
-    f = float(max(width, height))
-    camera_matrix = np.array(
-        [[f, 0.0, width / 2.0], [0.0, f, height / 2.0], [0.0, 0.0, 1.0]],
-        dtype=np.float32,
-    )
-    dist_coeffs = np.zeros((4, 1), dtype=np.float32)
-
-    success, rvec, tvec = cv2.solvePnP(
-        object_points,
-        image_points,
-        camera_matrix,
-        dist_coeffs,
-        flags=cv2.SOLVEPNP_EPNP,
-    )
-    if not success:
-        return None
-    R, _ = cv2.Rodrigues(rvec)
-    camera_pose_cv = np.eye(4)
-    camera_pose_cv[:3, :3] = R.T
-    camera_pose_cv[:3, 3] = (-R.T @ tvec).reshape(3)
-
-    camera_pose_gl = CV_TO_GL @ camera_pose_cv
-    yfov = 2.0 * np.arctan((height / 2.0) / f)
-    camera = pyrender.PerspectiveCamera(
-        yfov=float(yfov),
-        aspectRatio=width / height,
-        znear=0.05,
-        zfar=10.0,
-    )
-    return camera, camera_pose_gl
-
-
-def _fallback_camera(
-    k3d: np.ndarray, width: int, height: int
-) -> tuple[pyrender.camera.PerspectiveCamera, np.ndarray]:
-    bbox_min = k3d.min(axis=0)
-    bbox_max = k3d.max(axis=0)
-    center = (bbox_max + bbox_min) * 0.5
-    extent = np.max(bbox_max - bbox_min)
-    if extent < 1e-3:
-        extent = 0.5
-    distance = extent * 3.0
-    eye = center + np.array([0.0, 0.0, distance])
-    target = center
-    up = np.array([0.0, -1.0, 0.0])
-    camera_pose_cv = _look_at_pose(eye, target, up)
-    camera_pose_gl = CV_TO_GL @ camera_pose_cv
-    yfov = np.deg2rad(55.0)
-    camera = pyrender.PerspectiveCamera(
-        yfov=float(yfov),
-        aspectRatio=width / height,
-        znear=0.05,
-        zfar=10.0,
-    )
-    return camera, camera_pose_gl
-
-
-def align_landmarks_orthographic(
-    k2d: np.ndarray,
-    k3d: np.ndarray,
-    visibility_threshold: float = 0.4,
-) -> Tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray]:
-    valid = k2d[:, 2] > visibility_threshold
-    if valid.sum() < 6:
-        valid = k2d[:, 2] > 0.0
-    X = k3d[valid]
-    Y = k2d[valid, :2]
-    x_mean = X.mean(axis=0)
-    y_mean = Y.mean(axis=0)
-    Xc = X - x_mean
-    Yc = Y - y_mean
-    Yc3 = np.concatenate([Yc, np.zeros((Yc.shape[0], 1))], axis=1)
-    H = Xc.T @ Yc3
-    U, S, Vt = np.linalg.svd(H)
-    R = Vt.T @ U.T
-    if np.linalg.det(R) < 0:
-        Vt[-1, :] *= -1.0
-        R = Vt.T @ U.T
-    scale = np.trace(np.diag(S)) / np.sum(Xc ** 2)
-    aligned = scale * ((k3d - x_mean) @ R)
-    aligned[:, :2] += y_mean
-    return aligned, scale, R, y_mean, x_mean
-
-
-def _box_mesh(box: OrientedBox, color: Sequence[int]) -> trimesh.Trimesh:
-    mesh = trimesh.creation.box(extents=box.size)
-    transform = np.eye(4)
-    transform[:3, :3] = box.axes
-    transform[:3, 3] = box.center
-    mesh.apply_transform(transform)
-    mesh.apply_transform(CV_TO_GL)
-    color_rgba = np.array([*color, 255], dtype=np.uint8)
-    mesh.visual.vertex_colors = np.tile(color_rgba, (mesh.vertices.shape[0], 1))
-    return mesh
-
-
-def _cylinder_mesh(limb: LimbSegment, color: Sequence[int]) -> trimesh.Trimesh:
-    start = limb.start
-    end = limb.end
-    direction = end - start
-    length = np.linalg.norm(direction)
-    color_rgba = np.array([*color, 255], dtype=np.uint8)
-    if length < 1e-6:
-        mesh = trimesh.creation.icosphere(radius=limb.radius * 0.5)
-        mesh.apply_translation(start)
-        mesh.apply_transform(CV_TO_GL)
-        mesh.visual.vertex_colors = np.tile(color_rgba, (mesh.vertices.shape[0], 1))
-        return mesh
-    mesh = trimesh.creation.cylinder(
-        radius=limb.radius,
-        height=length,
-        sections=24,
-    )
-    direction_unit = direction / length
-    align = trimesh.geometry.align_vectors(np.array([0, 0, 1.0]), direction_unit)
-    mesh.apply_transform(align)
-    mesh.apply_translation((start + end) / 2.0)
-    mesh.apply_transform(CV_TO_GL)
-    mesh.visual.vertex_colors = np.tile(color_rgba, (mesh.vertices.shape[0], 1))
-    return mesh
+LIMB_SEGMENTS: Sequence[Tuple[str, LMS, LMS, str]] = [
+    ("left_upper_arm", LMS.LEFT_SHOULDER, LMS.LEFT_ELBOW, "arm_upper"),
+    ("left_forearm", LMS.LEFT_ELBOW, LMS.LEFT_WRIST, "arm_lower"),
+    ("left_hand", LMS.LEFT_WRIST, LMS.LEFT_INDEX, "hand"),
+    ("right_upper_arm", LMS.RIGHT_SHOULDER, LMS.RIGHT_ELBOW, "arm_upper"),
+    ("right_forearm", LMS.RIGHT_ELBOW, LMS.RIGHT_WRIST, "arm_lower"),
+    ("right_hand", LMS.RIGHT_WRIST, LMS.RIGHT_INDEX, "hand"),
+    ("left_thigh", LMS.LEFT_HIP, LMS.LEFT_KNEE, "leg_upper"),
+    ("left_calf", LMS.LEFT_KNEE, LMS.LEFT_ANKLE, "leg_lower"),
+    ("left_foot", LMS.LEFT_ANKLE, LMS.LEFT_FOOT_INDEX, "foot"),
+    ("right_thigh", LMS.RIGHT_HIP, LMS.RIGHT_KNEE, "leg_upper"),
+    ("right_calf", LMS.RIGHT_KNEE, LMS.RIGHT_ANKLE, "leg_lower"),
+    ("right_foot", LMS.RIGHT_ANKLE, LMS.RIGHT_FOOT_INDEX, "foot"),
+]
 
 
 def render_structure_overlay(
     image_bgr: np.ndarray,
     k2d: np.ndarray,
     k3d: np.ndarray,
-    boxes: Optional[Sequence[OrientedBox]] = None,
-    limbs: Optional[Sequence[LimbSegment]] = None,
-) -> tuple[Optional[np.ndarray], AlignedStructure]:
+    style: str = "painterly",
+) -> Tuple[np.ndarray, List]:
+    """
+    Build a stylized RGBA overlay representing the figure as construction primitives.
+
+    Returns:
+        overlay_rgba: np.ndarray (H, W, 4)
+        boxes_3d: List of OrientedBox (pelvis, ribcage, head)
+    """
+
+    style_cfg = STYLE_PRESETS.get(style, STYLE_PRESETS["painterly"])
     height, width = image_bgr.shape[:2]
-    aligned_landmarks, scale, rotation, translation_xy, origin_3d = align_landmarks_orthographic(
-        k2d, k3d
-    )
-    aligned_landmarks[:, 1] = height - aligned_landmarks[:, 1]
 
-    if boxes is None or limbs is None:
-        from pose_utils import compute_oriented_boxes, compute_limb_segments
+    overlay_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    overlay_alpha = np.zeros((height, width), dtype=np.uint8)
 
-        boxes = compute_oriented_boxes(aligned_landmarks)
-        limbs = compute_limb_segments(aligned_landmarks)
+    shapes = _collect_shapes(k2d, k3d, style_cfg)
+    # draw farthest shapes first (largest depth)
+    shapes.sort(key=lambda item: item["depth"], reverse=True)
 
-    offset = np.array([width / 2.0, height / 2.0, 0.0])
-    shifted_boxes = [_shift_box(box, offset) for box in boxes]
-    shifted_limbs = [_shift_limb(limb, offset) for limb in limbs]
-
-    attempts: list[tuple[pyrender.camera.Camera, np.ndarray]] = []
-    solve = _solve_camera(k2d, k3d, width, height)
-    if solve:
-        attempts.append(solve)
-    attempts.append(_fallback_camera(aligned_landmarks, width, height))
-
-    ortho_cam = pyrender.OrthographicCamera(
-        xmag=width / 2.0,
-        ymag=height / 2.0,
-        znear=0.05,
-        zfar=5000.0,
-    )
-    ortho_pose_cv = _look_at_pose(
-        np.array([0.0, 0.0, 1500.0]),
-        np.zeros(3),
-        np.array([0.0, 1.0, 0.0]),
-    )
-    ortho_pose_gl = CV_TO_GL @ ortho_pose_cv
-    attempts.append((ortho_cam, ortho_pose_gl))
-
-    scene = pyrender.Scene(
-        bg_color=np.array([0.0, 0.0, 0.0, 0.0]),
-        ambient_light=np.array([0.1, 0.1, 0.1, 1.0]),
-    )
-
-    box_colors = {
-        "pelvis": (80, 150, 255),
-        "ribcage": (255, 160, 60),
-        "head": (220, 120, 255),
-    }
-    limb_color = (120, 255, 120)
-
-    for box in shifted_boxes:
-        mesh = _box_mesh(box, box_colors.get(box.name, (200, 200, 200)))
-        scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=False))
-
-    for limb in shifted_limbs:
-        mesh = _cylinder_mesh(limb, limb_color)
-        scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=True))
-
-    def add_lights(scn: pyrender.Scene) -> None:
-        light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
-        light_pose = np.eye(4)
-        light_pose[:3, 3] = np.array([0.0, 1.0, 2.5])
-        scn.add(light, pose=light_pose)
-
-        rim_light = pyrender.DirectionalLight(color=np.array([0.6, 0.6, 1.0]), intensity=1.8)
-        rim_pose = np.array(
-            [
-                [0.6, 0.0, 0.8, -1.5],
-                [0.0, 1.0, 0.0, 1.2],
-                [-0.8, 0.0, 0.6, 1.8],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=np.float32,
-        )
-        scn.add(rim_light, pose=rim_pose)
-        fill = pyrender.PointLight(color=np.array([1.0, 0.9, 0.8]), intensity=15.0)
-        fill_pose = np.array(
-            [
-                [1.0, 0.0, 0.0, 0.4],
-                [0.0, 1.0, 0.0, -0.2],
-                [0.0, 0.0, 1.0, 0.8],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=np.float32,
-        )
-        scn.add(fill, pose=fill_pose)
-
-    add_lights(scene)
-
-    renderer = pyrender.OffscreenRenderer(width, height)
-    try:
-        for camera, camera_pose in attempts:
-            node = scene.add(camera, pose=camera_pose)
-            color, _ = renderer.render(
-                scene, flags=pyrender.RenderFlags.RGBA | pyrender.RenderFlags.FLAT
+    for shape in shapes:
+        if shape["kind"] == "box":
+            _draw_box(
+                overlay_rgb,
+                overlay_alpha,
+                shape["points"],
+                style_cfg[shape["style_key"]],
             )
-            scene.remove_node(node)
-            if color[..., 3].max() > 0:
-                info = AlignedStructure(
-                    landmarks=aligned_landmarks,
-                    boxes=boxes,
-                    limbs=limbs,
-                    rotation=rotation,
-                    scale=scale,
-                    translation_xy=translation_xy,
-                    origin_3d=origin_3d,
-                )
-                return color, info
-    finally:
-        renderer.delete()
-    info = AlignedStructure(
-        landmarks=aligned_landmarks,
-        boxes=boxes,
-        limbs=limbs,
-        rotation=rotation,
-        scale=scale,
-        translation_xy=translation_xy,
-        origin_3d=origin_3d,
-    )
-    return None, info
+        elif shape["kind"] == "pelvis":
+            _draw_box(
+                overlay_rgb,
+                overlay_alpha,
+                shape["points"],
+                style_cfg["pelvis"],
+            )
+        elif shape["kind"] == "head":
+            _draw_head(
+                overlay_rgb,
+                overlay_alpha,
+                shape["center"],
+                shape["axes"],
+                shape["angle"],
+                style_cfg["head"],
+            )
+        elif shape["kind"] == "capsule":
+            _draw_capsule(
+                overlay_rgb,
+                overlay_alpha,
+                shape["p0"],
+                shape["p1"],
+                style_cfg["limbs"]["categories"][shape["category"]],
+                style_cfg["limbs"]["highlight_shift"],
+            )
+
+    overlay_rgba = np.dstack([overlay_rgb, overlay_alpha])
+    boxes_world = compute_oriented_boxes(k3d)
+    return overlay_rgba, boxes_world
 
 
 def composite_overlay(base_bgr: np.ndarray, overlay_rgba: np.ndarray) -> np.ndarray:
-    if overlay_rgba is None:
+    """Composite a RGBA overlay onto the base image."""
+    if overlay_rgba is None or overlay_rgba.shape[2] != 4:
         return base_bgr
-    overlay_rgb = overlay_rgba[:, :, :3][:, :, ::-1].astype(np.float32)
-    alpha = (overlay_rgba[:, :, 3:4].astype(np.float32)) / 255.0
-    alpha = np.clip(alpha * 0.6, 0.0, 1.0)
+    overlay = overlay_rgba[..., :3].astype(np.float32)
+    alpha = (overlay_rgba[..., 3:4].astype(np.float32)) / 255.0
     base = base_bgr.astype(np.float32)
-    comp = overlay_rgb * alpha + base * (1.0 - alpha)
+    comp = overlay * alpha + base * (1.0 - alpha)
     return comp.astype(np.uint8)
 
 
-def _look_at_pose(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
-    forward = target - eye
-    norm = np.linalg.norm(forward)
-    if norm < 1e-6:
-        forward = np.array([0.0, 0.0, -1.0])
-    else:
-        forward = forward / norm
-    up = up / (np.linalg.norm(up) + 1e-8)
-    right = np.cross(forward, up)
-    right /= np.linalg.norm(right) + 1e-8
-    up_corrected = np.cross(right, forward)
-    pose = np.eye(4, dtype=np.float32)
-    pose[0, :3] = right
-    pose[1, :3] = up_corrected
-    pose[2, :3] = -forward
-    pose[:3, 3] = eye
-    return pose
-
-
-def _shift_box(box: OrientedBox, offset: np.ndarray) -> OrientedBox:
-    return OrientedBox(
-        name=box.name,
-        center=box.center - offset,
-        axes=box.axes,
-        size=box.size,
-    )
-
-
-def _shift_limb(limb: LimbSegment, offset: np.ndarray) -> LimbSegment:
-    return LimbSegment(
-        name=limb.name,
-        start=limb.start - offset,
-        end=limb.end - offset,
-        radius=limb.radius,
-    )
-
-
-def serialize_box_info(
-    struct_info: AlignedStructure, box_names: Iterable[str] = ("pelvis", "ribcage")
-) -> dict:
-    boxes_payload = []
-    for box in struct_info.boxes:
+def serialize_box_info(boxes: Sequence, box_names: Iterable[str] = ("pelvis", "ribcage")) -> dict:
+    payload = []
+    for box in boxes:
         if box.name not in box_names:
             continue
-        boxes_payload.append(
+        payload.append(
             {
                 "name": box.name,
                 "center": box.center.tolist(),
@@ -353,12 +366,242 @@ def serialize_box_info(
                 "corners": box.corners().tolist(),
             }
         )
-    return {
-        "boxes": boxes_payload,
-        "transform": {
-            "scale": struct_info.scale,
-            "rotation": struct_info.rotation.tolist(),
-            "translation_xy": struct_info.translation_xy.tolist(),
-            "origin_3d": struct_info.origin_3d.tolist(),
-        },
-    }
+    return {"boxes": payload}
+
+
+def _collect_shapes(k2d: np.ndarray, k3d: np.ndarray, style_cfg: Dict) -> List[Dict]:
+    coords2d = {member.name: k2d[member.value, :2] for member in LMS}
+    coords3d = {member.name: k3d[member.value] for member in LMS}
+
+    shapes: List[Dict] = []
+
+    torso_shape = _build_torso_shape(coords2d, coords3d, style_cfg["torso"])
+    if torso_shape:
+        shapes.append(torso_shape)
+
+    pelvis_shape = _build_pelvis_shape(coords2d, coords3d, style_cfg["pelvis"])
+    if pelvis_shape:
+        shapes.append(pelvis_shape)
+
+    head_shape = _build_head_shape(coords2d, coords3d, style_cfg["head"])
+    if head_shape:
+        shapes.append(head_shape)
+
+    limb_shapes = _build_limb_shapes(coords2d, coords3d, style_cfg["limbs"]["categories"])
+    shapes.extend(limb_shapes)
+
+    return shapes
+
+
+def _build_torso_shape(coords2d: Dict[str, np.ndarray], coords3d: Dict[str, np.ndarray], style: Dict) -> Dict:
+    left_sh = coords2d[LMS.LEFT_SHOULDER.name]
+    right_sh = coords2d[LMS.RIGHT_SHOULDER.name]
+    left_hip = coords2d[LMS.LEFT_HIP.name]
+    right_hip = coords2d[LMS.RIGHT_HIP.name]
+
+    lift = style.get("bottom_lift", 0.25)
+    taper = style.get("waist_taper", 0.18)
+
+    bottom_left = left_hip + (left_sh - left_hip) * lift
+    bottom_right = right_hip + (right_sh - right_hip) * lift
+    bottom_center = (bottom_left + bottom_right) * 0.5
+    bottom_left = bottom_center + (bottom_left - bottom_center) * (1.0 - taper)
+    bottom_right = bottom_center + (bottom_right - bottom_center) * (1.0 - taper)
+
+    points = np.array([left_sh, right_sh, bottom_right, bottom_left], dtype=np.float32)
+    depth = float(
+        (
+            coords3d[LMS.LEFT_SHOULDER.name][2]
+            + coords3d[LMS.RIGHT_SHOULDER.name][2]
+            + coords3d[LMS.LEFT_HIP.name][2]
+            + coords3d[LMS.RIGHT_HIP.name][2]
+        )
+        / 4.0
+    )
+    return {"kind": "box", "points": points, "depth": depth, "style_key": "torso"}
+
+
+def _build_pelvis_shape(coords2d: Dict[str, np.ndarray], coords3d: Dict[str, np.ndarray], style: Dict) -> Dict:
+    left_sh = coords2d[LMS.LEFT_SHOULDER.name]
+    right_sh = coords2d[LMS.RIGHT_SHOULDER.name]
+    left_hip = coords2d[LMS.LEFT_HIP.name]
+    right_hip = coords2d[LMS.RIGHT_HIP.name]
+    left_knee = coords2d[LMS.LEFT_KNEE.name]
+    right_knee = coords2d[LMS.RIGHT_KNEE.name]
+
+    lift = style.get("bottom_lift", 0.08)
+    length_factor = style.get("length_factor", 0.36)
+    flare = style.get("flare", 0.22)
+
+    top_left = left_hip + (left_sh - left_hip) * lift
+    top_right = right_hip + (right_sh - right_hip) * lift
+    bottom_left = top_left + (left_knee - top_left) * length_factor
+    bottom_right = top_right + (right_knee - top_right) * length_factor
+    bottom_center = (bottom_left + bottom_right) * 0.5
+    bottom_left = bottom_center + (bottom_left - bottom_center) * (1.0 + flare)
+    bottom_right = bottom_center + (bottom_right - bottom_center) * (1.0 + flare)
+
+    points = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+    depth = float(
+        (
+            coords3d[LMS.LEFT_HIP.name][2]
+            + coords3d[LMS.RIGHT_HIP.name][2]
+            + coords3d[LMS.LEFT_KNEE.name][2]
+            + coords3d[LMS.RIGHT_KNEE.name][2]
+        )
+        / 4.0
+    )
+    return {"kind": "pelvis", "points": points, "depth": depth}
+
+
+def _build_head_shape(coords2d: Dict[str, np.ndarray], coords3d: Dict[str, np.ndarray], style: Dict) -> Dict:
+    nose = coords2d[LMS.NOSE.name]
+    left_ear = coords2d[LMS.LEFT_EAR.name]
+    right_ear = coords2d[LMS.RIGHT_EAR.name]
+    left_eye = coords2d[LMS.LEFT_EYE_OUTER.name]
+    right_eye = coords2d[LMS.RIGHT_EYE_OUTER.name]
+    shoulder_left = coords2d[LMS.LEFT_SHOULDER.name]
+    shoulder_right = coords2d[LMS.RIGHT_SHOULDER.name]
+
+    ear_span = np.linalg.norm(right_ear - left_ear)
+    if ear_span < 1e-3:
+        ear_span = np.linalg.norm(right_eye - left_eye)
+
+    if ear_span < 1e-3:
+        return {}
+
+    center = (nose * 0.4) + ((left_eye + right_eye) * 0.3) + (((shoulder_left + shoulder_right) * 0.5) * 0.3)
+    axes = (
+        max(12.0, ear_span * style.get("width_scale", 0.55)),
+        max(18.0, ear_span * style.get("height_scale", 1.05)),
+    )
+    angle = np.degrees(np.arctan2(right_ear[1] - left_ear[1], right_ear[0] - left_ear[0]))
+    depth = float(
+        (
+            coords3d[LMS.NOSE.name][2]
+            + coords3d[LMS.LEFT_EAR.name][2]
+            + coords3d[LMS.RIGHT_EAR.name][2]
+        )
+        / 3.0
+    )
+    return {"kind": "head", "center": center, "axes": axes, "angle": angle, "depth": depth}
+
+
+def _build_limb_shapes(coords2d: Dict[str, np.ndarray], coords3d: Dict[str, np.ndarray], categories: Dict) -> List[Dict]:
+    shapes: List[Dict] = []
+    for name, joint_a, joint_b, category in LIMB_SEGMENTS:
+        p0 = coords2d[joint_a.name]
+        p1 = coords2d[joint_b.name]
+        length = float(np.linalg.norm(p1 - p0))
+        if length < 1e-3 or category not in categories:
+            continue
+        style = categories[category]
+        width_scale = style.get("width_scale", 0.28)
+        min_thickness = style.get("min_thickness", 12)
+        thickness = max(min_thickness, length * width_scale)
+        depth = float((coords3d[joint_a.name][2] + coords3d[joint_b.name][2]) / 2.0)
+        shapes.append(
+            {
+                "kind": "capsule",
+                "p0": p0,
+                "p1": p1,
+                "radius": thickness / 2.0,
+                "category": category,
+                "depth": depth,
+            }
+        )
+    return shapes
+
+
+def _draw_box(canvas_rgb: np.ndarray, canvas_alpha: np.ndarray, points: np.ndarray, style: Dict) -> None:
+    pts = np.round(points).astype(np.int32)
+    h, w = canvas_alpha.shape
+    pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
+    pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, pts, 255, lineType=cv2.LINE_AA)
+
+    for c in range(3):
+        canvas_rgb[..., c] = np.where(mask > 0, style["fill"][c], canvas_rgb[..., c])
+    canvas_alpha[mask > 0] = style["alpha"]
+
+    cv2.polylines(canvas_rgb, [pts], True, style["edge"], 2, cv2.LINE_AA)
+    # diagonal guides
+    cv2.line(canvas_rgb, tuple(pts[0]), tuple(pts[2]), style["highlight"], 1, cv2.LINE_AA)
+    cv2.line(canvas_rgb, tuple(pts[1]), tuple(pts[3]), style["highlight"], 1, cv2.LINE_AA)
+
+
+def _draw_head(canvas_rgb: np.ndarray, canvas_alpha: np.ndarray, center: np.ndarray, axes: Tuple[float, float], angle: float, style: Dict) -> None:
+    h, w = canvas_alpha.shape
+    center_int = tuple(np.round(center).astype(int))
+    axes_int = (int(max(8, axes[0] / 2.0)), int(max(10, axes[1] / 2.0)))
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.ellipse(mask, center_int, axes_int, angle, 0, 360, 255, -1, cv2.LINE_AA)
+
+    for c in range(3):
+        canvas_rgb[..., c] = np.where(mask > 0, style["fill"][c], canvas_rgb[..., c])
+    canvas_alpha[mask > 0] = style["alpha"]
+
+    # highlight band
+    highlight_axes = (int(axes_int[0] * 0.6), int(axes_int[1] * 0.6))
+    cv2.ellipse(canvas_rgb, center_int, highlight_axes, angle - 15, -140, 40, style["highlight"], 2, cv2.LINE_AA)
+
+    cv2.ellipse(canvas_rgb, center_int, axes_int, angle, 0, 360, style["edge"], 2, cv2.LINE_AA)
+    cv2.line(
+        canvas_rgb,
+        (center_int[0], center_int[1] - axes_int[1]),
+        (center_int[0], center_int[1] + axes_int[1]),
+        style["highlight"],
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def _draw_capsule(
+    canvas_rgb: np.ndarray,
+    canvas_alpha: np.ndarray,
+    p0: np.ndarray,
+    p1: np.ndarray,
+    style: Dict,
+    highlight_shift: float,
+) -> None:
+    h, w = canvas_alpha.shape
+    p0 = np.array(p0, dtype=np.float32)
+    p1 = np.array(p1, dtype=np.float32)
+    direction = p1 - p0
+    length = np.linalg.norm(direction)
+    if length < 1e-3:
+        return
+    direction_unit = direction / length
+    normal = np.array([-direction_unit[1], direction_unit[0]])
+    radius = max(style.get("min_thickness", 12) / 2.0, length * style.get("width_scale", 0.3) / 2.0)
+    thickness = int(max(2.0, radius * 2.0))
+
+    p0_int = tuple(np.round(p0).astype(int))
+    p1_int = tuple(np.round(p1).astype(int))
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.line(mask, p0_int, p1_int, 255, thickness, cv2.LINE_AA)
+    cv2.circle(mask, p0_int, thickness // 2, 255, -1, cv2.LINE_AA)
+    cv2.circle(mask, p1_int, thickness // 2, 255, -1, cv2.LINE_AA)
+
+    for c in range(3):
+        canvas_rgb[..., c] = np.where(mask > 0, style["fill"][c], canvas_rgb[..., c])
+    canvas_alpha[mask > 0] = style["alpha"]
+
+    # highlight stripe offset to one side
+    highlight_offset = normal * highlight_shift * radius
+    hp0 = tuple(np.round(p0 + highlight_offset).astype(int))
+    hp1 = tuple(np.round(p1 + highlight_offset).astype(int))
+    highlight_thick = max(1, int(thickness * 0.35))
+    cv2.line(canvas_rgb, hp0, hp1, style["highlight"], highlight_thick, cv2.LINE_AA)
+    cv2.circle(canvas_rgb, hp0, highlight_thick // 2, style["highlight"], -1, cv2.LINE_AA)
+    cv2.circle(canvas_rgb, hp1, highlight_thick // 2, style["highlight"], -1, cv2.LINE_AA)
+
+    # contour stroke
+    edge_thick = max(1, thickness // 6)
+    cv2.line(canvas_rgb, p0_int, p1_int, style["edge"], edge_thick, cv2.LINE_AA)
+    cv2.circle(canvas_rgb, p0_int, edge_thick + 1, style["edge"], edge_thick, cv2.LINE_AA)
+    cv2.circle(canvas_rgb, p1_int, edge_thick + 1, style["edge"], edge_thick, cv2.LINE_AA)
