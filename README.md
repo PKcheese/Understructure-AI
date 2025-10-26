@@ -10,6 +10,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## REST API
+
+```bash
+uvicorn api:app --reload
+```
+
+Then send a multipart form-data POST to `http://127.0.0.1:8000/maquette` with an `image` field containing a JPEG or PNG. The response streams back `maquette_modified_rings.glb`. You can exercise the endpoint via the interactive docs (`/docs`) or the helper client in `import requests.py`.
+
 ## 1. Mark landmarks
 
 ```bash
