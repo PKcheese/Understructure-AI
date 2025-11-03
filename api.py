@@ -91,7 +91,13 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
 
     image_bgr, k2d, k3d = run_pose_estimation(image_path)
     stabilizer = PoseStabilizer(ema_alpha=0.35)
-    k3d_stabilized = stabilizer.stabilize(k3d, return_world=True)
+    try:
+        k3d_stabilized = stabilizer.stabilize(k3d, return_world=True)
+        if not np.all(np.isfinite(k3d_stabilized)):
+            raise ValueError("Stabilized landmarks contain non-finite values.")
+    except Exception:
+        print("Stabilizer failed; falling back to raw landmarks for this frame.", flush=True)
+        k3d_stabilized = None
 
     boxes = compute_oriented_boxes(k3d)
     limbs, hand_boxes = compute_limb_segments(k3d)
@@ -101,13 +107,16 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
     alignment = _compute_view_alignment(k2d, k3d, visibility_thresh=0.25)
     meshes = _build_meshes(boxes, limbs, sections=24, min_visibility=0.25)
 
-    boxes_stabilized = compute_oriented_boxes(k3d_stabilized)
-    limbs_stabilized, hand_boxes_stabilized = compute_limb_segments(k3d_stabilized)
-    boxes_stabilized = boxes_stabilized + hand_boxes_stabilized
-    alignment_stabilized = _compute_view_alignment(k2d, k3d_stabilized, visibility_thresh=0.25)
-    meshes_stabilized = _build_meshes(
-        boxes_stabilized, limbs_stabilized, sections=24, min_visibility=0.25
-    )
+    meshes_stabilized = None
+    alignment_stabilized = None
+    if k3d_stabilized is not None:
+        boxes_stabilized = compute_oriented_boxes(k3d_stabilized)
+        limbs_stabilized, hand_boxes_stabilized = compute_limb_segments(k3d_stabilized)
+        boxes_stabilized = boxes_stabilized + hand_boxes_stabilized
+        alignment_stabilized = _compute_view_alignment(k2d, k3d_stabilized, visibility_thresh=0.25)
+        meshes_stabilized = _build_meshes(
+            boxes_stabilized, limbs_stabilized, sections=24, min_visibility=0.25
+        )
 
     def _export_variant(meshes_variant: Sequence[trimesh.Trimesh], target: Path) -> None:
         modified = _clone_meshes_with_modifications(
@@ -131,14 +140,16 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
             mesh.apply_transform(alignment)
             _apply_transform_to_metadata(mesh, alignment)
 
-    stabilized_meshes = [mesh.copy() for mesh in meshes_stabilized]
-    if alignment_stabilized is not None:
-        for mesh in stabilized_meshes:
-            mesh.apply_transform(alignment_stabilized)
-            _apply_transform_to_metadata(mesh, alignment_stabilized)
-    _apply_mesh_transform(stabilized_meshes, BASE_EXPORT_TRANSFORM)
-    stabilized_path = output_dir / "maquette_with_stabilization.glb"
-    _export_variant(stabilized_meshes, stabilized_path)
+    stabilized_path: Optional[Path] = None
+    if meshes_stabilized is not None:
+        stabilized_meshes = [mesh.copy() for mesh in meshes_stabilized]
+        if alignment_stabilized is not None:
+            for mesh in stabilized_meshes:
+                mesh.apply_transform(alignment_stabilized)
+                _apply_transform_to_metadata(mesh, alignment_stabilized)
+        _apply_mesh_transform(stabilized_meshes, BASE_EXPORT_TRANSFORM)
+        stabilized_path = output_dir / "maquette_with_stabilization.glb"
+        _export_variant(stabilized_meshes, stabilized_path)
 
     preview_meshes = [mesh.copy() for mesh in match_meshes]
     _apply_mesh_transform(preview_meshes, BASE_EXPORT_TRANSFORM)
@@ -169,7 +180,8 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.write(no_match_path, arcname=no_match_path.name)
         zf.write(match_path, arcname=match_path.name)
-        zf.write(stabilized_path, arcname=stabilized_path.name)
+        if stabilized_path is not None:
+            zf.write(stabilized_path, arcname=stabilized_path.name)
         zf.write(landmarks_path, arcname=landmarks_path.name)
         zf.write(preview_path, arcname=preview_path.name)
 
@@ -230,6 +242,9 @@ async def make_maquette(request: Request, image: UploadFile = File(...)) -> File
         media_type = "model/gltf-binary"
     elif variant in {"stabilized", "stabilized_glb"}:
         response_path = assets["stabilized"]
+        if response_path is None:
+            cleanup()
+            raise HTTPException(status_code=503, detail="Stabilized variant unavailable for this frame.")
         filename = "maquette_with_stabilization.glb"
         media_type = "model/gltf-binary"
     else:

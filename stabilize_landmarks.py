@@ -4,7 +4,7 @@ from collections import deque
 # ---- MediaPipe indices (subset you’ll need often) ----
 NOSE=0; L_EYE_IN=1; R_EYE_IN=4
 L_SHOULDER=11; R_SHOULDER=12; L_ELBOW=13; R_ELBOW=14; L_WRIST=15; R_WRIST=16
-L_HIP=23; R_HIP=24; L_KNEE=25; R_KNEE=26; L_ANKLE=27; R_ANKLE=28
+L_HIP=23; R_HIP=24; L_KNEE=25; R_KNEE=26; L_ANKLE=27; R_ANKLE=28; L_FOOT=31; R_FOOT=32
 
 # Pairs defining the kinematic tree (parent -> child)
 BONES = [
@@ -24,12 +24,31 @@ JOINT_LIMITS = {
     ("R_ELBOW", (R_SHOULDER, R_ELBOW, R_WRIST)): (0.0, 150.0),
 }
 
+# Normalised fallback lengths (after shoulder-width scaling).
+DEFAULT_BONE_LENGTHS = {
+    (L_SHOULDER, L_ELBOW): 0.36,
+    (L_ELBOW, L_WRIST): 0.32,
+    (R_SHOULDER, R_ELBOW): 0.36,
+    (R_ELBOW, R_WRIST): 0.32,
+    (L_HIP, L_KNEE): 0.45,
+    (L_KNEE, L_ANKLE): 0.43,
+    (R_HIP, R_KNEE): 0.45,
+    (R_KNEE, R_ANKLE): 0.43,
+    (L_SHOULDER, R_SHOULDER): 1.0,
+    (L_HIP, R_HIP): 0.9,
+}
+MIN_SHOULDER_WIDTH = 1e-2
+MIN_BONE_LENGTH = 5e-2
+EPS = 1e-8
+
 def vec(a,b):
     return b - a
 
 def unit(v, eps=1e-8):
     n = np.linalg.norm(v)
-    return v / (n + eps)
+    if n < eps:
+        return np.zeros_like(v)
+    return v / n
 
 def angle(a,b,c):
     """Angle at b from ba to bc in radians."""
@@ -81,8 +100,9 @@ class PoseStabilizer:
         # flip sign to a conventional right-handed camera -> body space if you like:
         lms[:,2] *= -1.0
 
-        sh_w = np.linalg.norm(lms[L_SHOULDER] - lms[R_SHOULDER])
-        sh_w = float(max(sh_w, 1e-8))
+        sh_w = float(np.linalg.norm(lms[L_SHOULDER] - lms[R_SHOULDER]))
+        if not np.isfinite(sh_w) or sh_w < MIN_SHOULDER_WIDTH:
+            sh_w = 1.0
         scale = 1.0 / sh_w
         lms *= scale
         return lms, origin, sh_w
@@ -101,7 +121,10 @@ class PoseStabilizer:
             return
         self.calib_lengths = {}
         for i,j in BONES:
-            self.calib_lengths[(i,j)] = np.linalg.norm(lms[j]-lms[i])
+            length = float(np.linalg.norm(lms[j]-lms[i]))
+            if not np.isfinite(length) or length < MIN_BONE_LENGTH:
+                length = DEFAULT_BONE_LENGTHS.get((i,j)) or DEFAULT_BONE_LENGTHS.get((j,i)) or 0.5
+            self.calib_lengths[(i,j)] = length
 
     # --- 3) Simple depth flip correction for elbows/knees ---
     def flip_correction(self, lms):
@@ -146,8 +169,12 @@ class PoseStabilizer:
         if self.calib_lengths is None:
             return lms
         for i,j in BONES:
-            target = self.calib_lengths[(i,j)]
+            target = self.calib_lengths.get((i,j))
+            if target is None or target <= EPS:
+                continue
             dir_ij = unit(lms[j]-lms[i])
+            if not np.any(dir_ij):
+                continue
             lms[j] = lms[i] + dir_ij*target
         return lms
 
@@ -169,13 +196,27 @@ class PoseStabilizer:
         scaled coordinates; set ``return_world=True`` to project back to
         MediaPipe/world coordinates.
         """
+        raw_landmarks_xyz = np.asarray(raw_landmarks_xyz, dtype=np.float32)
+        if raw_landmarks_xyz.shape != (33, 3):
+            raise ValueError("Expected (33,3) landmark array.")
+        if not np.all(np.isfinite(raw_landmarks_xyz)):
+            return raw_landmarks_xyz.copy()
+
         lms_norm, origin, shoulder_width = self.normalize(raw_landmarks_xyz)
         lms = lms_norm
         self.maybe_calibrate(lms)
-        lms = self.flip_correction(lms)
-        lms = self.apply_joint_limits(lms)
-        lms = self.enforce_lengths(lms)
-        lms = self.smooth(lms)
+        steps = (
+            self.flip_correction,
+            self.apply_joint_limits,
+            self.enforce_lengths,
+            self.smooth,
+        )
+        for step in steps:
+            lms = step(lms)
+            if not np.all(np.isfinite(lms)):
+                # revert to the best-known stable state (normalized input)
+                lms = lms_norm
+                break
         if return_world:
             return self.denormalize(lms, origin, shoulder_width)
         return lms
