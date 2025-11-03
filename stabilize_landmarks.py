@@ -82,9 +82,18 @@ class PoseStabilizer:
         lms[:,2] *= -1.0
 
         sh_w = np.linalg.norm(lms[L_SHOULDER] - lms[R_SHOULDER])
-        scale = 1.0 / (sh_w + 1e-8)
+        sh_w = float(max(sh_w, 1e-8))
+        scale = 1.0 / sh_w
         lms *= scale
-        return lms
+        return lms, origin, sh_w
+
+    def denormalize(self, lms, origin, shoulder_width):
+        """Undo normalize(): rescale, unflip depth, and reapply origin."""
+        restored = lms.copy()
+        restored *= shoulder_width
+        restored[:,2] *= -1.0
+        restored += origin
+        return restored
 
     # --- 2) Save bone lengths from a decent calibration frame (first stable frame) ---
     def maybe_calibrate(self, lms):
@@ -153,26 +162,33 @@ class PoseStabilizer:
         return sm
 
     # ---- Public entry point ----
-    def stabilize(self, raw_landmarks_xyz):
+    def stabilize(self, raw_landmarks_xyz, *, return_world=False):
         """
         raw_landmarks_xyz: np.ndarray (33,3) in MediaPipe coords
-        returns: stabilized np.ndarray (33,3) in pelvis-centered, scaled coords
+        returns: stabilized np.ndarray (33,3). By default this is pelvis-centered,
+        scaled coordinates; set ``return_world=True`` to project back to
+        MediaPipe/world coordinates.
         """
-        lms = self.normalize(raw_landmarks_xyz)
+        lms_norm, origin, shoulder_width = self.normalize(raw_landmarks_xyz)
+        lms = lms_norm
         self.maybe_calibrate(lms)
         lms = self.flip_correction(lms)
         lms = self.apply_joint_limits(lms)
         lms = self.enforce_lengths(lms)
         lms = self.smooth(lms)
+        if return_world:
+            return self.denormalize(lms, origin, shoulder_width)
         return lms
 
 
 # ---- Convenience wrapper ----
 _stabilizer = PoseStabilizer(ema_alpha=0.35)
 
-def stabilize_landmarks(raw_landmarks_xyz: np.ndarray) -> np.ndarray:
+def stabilize_landmarks(raw_landmarks_xyz: np.ndarray, *, return_world: bool = False) -> np.ndarray:
     """
     Call this once per frame with MediaPipe's 33x3 array (x,y,z).
-    Returns stabilized landmarks (pelvis-centered, scaled).
+    Returns stabilized landmarks (pelvis-centered, scaled) unless
+    ``return_world=True`` is provided, in which case the coordinates are mapped
+    back into the original MediaPipe/world space.
     """
-    return _stabilizer.stabilize(raw_landmarks_xyz)
+    return _stabilizer.stabilize(raw_landmarks_xyz, return_world=return_world)
