@@ -7,7 +7,8 @@ Usage:
 
 POST /maquette with a multipart field named ``image`` (JPEG or PNG) and the
 response will stream back ``maquette_variants.zip`` containing the
-aligned, non-aligned, and stabilized maquette GLBs, a landmark-only export, and a preview PNG.
+aligned, non-aligned, and stabilized maquette GLBs, a landmark-only export,
+the gesture overlay, and a preview PNG.
 """
 
 from __future__ import annotations
@@ -30,9 +31,11 @@ from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 from starlette.background import BackgroundTask  # noqa: E402
 
 from pose_utils import (  # noqa: E402
+    build_gesture_curves,
     LMS,
     compute_limb_segments,
     compute_oriented_boxes,
+    draw_gesture_overlay,
     run_pose_estimation,
 )
 from stabilize_landmarks import PoseStabilizer  # noqa: E402
@@ -90,6 +93,8 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
     output_dir.mkdir(parents=True, exist_ok=True)
 
     image_bgr, k2d, k3d = run_pose_estimation(image_path)
+    gesture_curves = build_gesture_curves(k2d, iterations=3)
+    gesture_overlay = draw_gesture_overlay(image_bgr, gesture_curves, thickness=3)
     stabilizer = PoseStabilizer(ema_alpha=0.35)
     try:
         k3d_stabilized = stabilizer.stabilize(k3d, return_world=True)
@@ -176,6 +181,9 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
     landmarks_path = output_dir / "mediapipe_landmarks.glb"
     _export_variant(landmark_meshes_copy, landmarks_path)
 
+    gesture_path = output_dir / "gesture_overlay.png"
+    cv2.imwrite(str(gesture_path), gesture_overlay)
+
     zip_path = output_dir / "maquette_variants.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.write(no_match_path, arcname=no_match_path.name)
@@ -184,6 +192,7 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
             zf.write(stabilized_path, arcname=stabilized_path.name)
         zf.write(landmarks_path, arcname=landmarks_path.name)
         zf.write(preview_path, arcname=preview_path.name)
+        zf.write(gesture_path, arcname=gesture_path.name)
 
     return {
         "zip": zip_path,
@@ -192,6 +201,7 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
         "stabilized": stabilized_path,
         "landmarks": landmarks_path,
         "preview": preview_path,
+        "gesture": gesture_path,
     }
 
 
@@ -235,6 +245,10 @@ async def make_maquette(request: Request, image: UploadFile = File(...)) -> File
     elif variant == "preview":
         response_path = assets["preview"]
         filename = "maquette_preview.png"
+        media_type = "image/png"
+    elif variant == "gesture":
+        response_path = assets["gesture"]
+        filename = "gesture_overlay.png"
         media_type = "image/png"
     elif variant == "landmarks":
         response_path = assets["landmarks"]
