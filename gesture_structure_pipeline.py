@@ -64,7 +64,8 @@ def main() -> None:
     gesture_img = draw_gesture_overlay(image, curves, thickness=args.thickness)
 
     boxes = compute_oriented_boxes(k3d)
-    limbs = compute_limb_segments(k3d)
+    limbs, hand_boxes = compute_limb_segments(k3d)
+    boxes = boxes + hand_boxes
     key_labels = priority_landmarks()
 
     cv2.imwrite(str(args.output_dir / "gesture_overlay.png"), gesture_img)

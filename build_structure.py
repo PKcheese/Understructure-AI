@@ -43,7 +43,8 @@ def main() -> None:
 
     _, k2d, k3d = run_pose_estimation(args.image)
     boxes = compute_oriented_boxes(k3d)
-    limbs = compute_limb_segments(k3d)
+    limbs, hand_boxes = compute_limb_segments(k3d)
+    boxes = boxes + hand_boxes
 
     json_path = args.output_dir / "structure.json"
     obj_path = args.output_dir / "structure.obj"
@@ -61,4 +62,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

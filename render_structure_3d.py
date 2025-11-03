@@ -43,6 +43,8 @@ BOX_COLOR_LOOKUP: Dict[str, Tuple[int, int, int, int]] = {
     "pelvis": (205, 150, 90, 255),
     "ribcage": (170, 190, 235, 255),
     "head": (215, 185, 170, 255),
+    "left_hand": (230, 160, 120, 255),
+    "right_hand": (230, 160, 120, 255),
 }
 
 CYLINDER_COLORS: Dict[str, Tuple[int, int, int, int]] = {
@@ -99,6 +101,14 @@ def _apply_transform_to_metadata(mesh: trimesh.Trimesh, transform: np.ndarray) -
         if "end" in metadata:
             end = np.array(metadata["end"], dtype=np.float32)
             metadata["end"] = (rot @ end + trans).tolist()
+    elif metadata.get("type") == "landmark":
+        rot = transform[:3, :3]
+        trans = transform[:3, 3]
+        if "position" in metadata:
+            pos = np.array(metadata["position"], dtype=np.float32)
+        else:
+            pos = np.zeros(3, dtype=np.float32)
+        metadata["position"] = (rot @ pos + trans).tolist()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -199,7 +209,8 @@ def main() -> None:
         _, k2d, k3d = run_pose_estimation(args.image)
 
     boxes = compute_oriented_boxes(k3d)
-    limbs = compute_limb_segments(k3d)
+    limbs, hand_boxes = compute_limb_segments(k3d)
+    boxes = boxes + hand_boxes
 
     alignment = None
     if args.match_image_view:
@@ -297,7 +308,7 @@ def _build_meshes(
         midpoint = (start + end) * 0.5
         cylinder.apply_translation(midpoint)
 
-        category = "arm" if "arm" in limb.name else "leg"
+        category = "arm" if any(token in limb.name for token in ("arm", "hand")) else "leg"
         color = CYLINDER_COLORS.get(category, (180, 180, 180, 255))
         cylinder.visual.vertex_colors = np.tile(np.array(color, dtype=np.uint8), (cylinder.vertices.shape[0], 1))
         cylinder.metadata = {
@@ -733,12 +744,16 @@ def _clone_meshes_with_modifications(
     ring_segments = {
         "left_upper_arm",
         "left_forearm",
+        "left_hand",
         "right_upper_arm",
         "right_forearm",
+        "right_hand",
         "left_thigh",
         "left_calf",
+        "left_foot",
         "right_thigh",
         "right_calf",
+        "right_foot",
     }
 
     for mesh in meshes:
@@ -776,7 +791,12 @@ def _clone_meshes_with_modifications(
                 modified.append(band)
             center = np.array(new_mesh.metadata.get("center", [0.0, 0.0, 0.0]), dtype=np.float32)
             size = np.array(new_mesh.metadata.get("size", [0.1, 0.1, 0.1]), dtype=np.float32)
-            spine_points[metadata["name"]] = (center, size)
+            axes = np.array(new_mesh.metadata.get("axes", np.eye(3)), dtype=np.float32)
+            try:
+                back_bottom = center - axes[:, 2] * (size[2] * 0.5) - axes[:, 1] * (size[1] * 0.5)
+            except Exception:
+                back_bottom = center
+            spine_points[metadata["name"]] = (back_bottom, size)
 
         if metadata.get("type") == "limb_segment" and metadata.get("name") in ring_segments:
             ring = _limb_ring_mesh(metadata, outline_color)

@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import cv2
 import numpy as np
 
-from pose_utils import LMS, compute_oriented_boxes
+from pose_utils import LMS, compute_limb_segments, compute_oriented_boxes
 
 
 def _bgr(r: int, g: int, b: int) -> Tuple[int, int, int]:
@@ -338,6 +338,8 @@ def render_structure_overlay(
 
     overlay_rgba = np.dstack([overlay_rgb, overlay_alpha])
     boxes_world = compute_oriented_boxes(k3d)
+    _, hand_boxes = compute_limb_segments(k3d)
+    boxes_world = boxes_world + hand_boxes
     return overlay_rgba, boxes_world
 
 

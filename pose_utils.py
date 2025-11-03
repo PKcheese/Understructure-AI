@@ -327,7 +327,43 @@ def compute_oriented_boxes(landmarks_3d: np.ndarray) -> List[OrientedBox]:
         max(torso_height * 0.45, 1e-3),
         max(hip_width * 0.7, 1e-3),
     )
-    pelvis = OrientedBox("pelvis", hip_center, pelvis_axes, pelvis_size)
+    pelvis_center = hip_center + pelvis_axes[:, 1] * (pelvis_size[1] * 0.5)
+
+    anchor_world = pelvis_center + pelvis_axes[:, 1] * (pelvis_size[1] * 0.5) + pelvis_axes[:, 2] * (
+        pelvis_size[2] * 0.5
+    )
+    bottom_original = pelvis_center + pelvis_axes[:, 1] * (-pelvis_size[1] * 0.5) + pelvis_axes[:, 2] * (
+        pelvis_size[2] * 0.5
+    )
+    angle_rad = math.radians(10.0)
+
+    def _rotated_axes(sign: float) -> Tuple[np.ndarray, np.ndarray]:
+        cos_a = math.cos(angle_rad * sign)
+        sin_a = math.sin(angle_rad * sign)
+        rot_local = np.array(
+            [[1.0, 0.0, 0.0], [0.0, cos_a, -sin_a], [0.0, sin_a, cos_a]],
+            dtype=np.float32,
+        )
+        new_axes = pelvis_axes @ rot_local
+        new_offset = new_axes[:, 1] * (pelvis_size[1] * 0.5) + new_axes[:, 2] * (pelvis_size[2] * 0.5)
+        new_center = anchor_world - new_offset
+        return new_axes, new_center
+
+    pelvis_axes_rot, pelvis_center_rot = _rotated_axes(sign=1.0)
+    bottom_candidate = pelvis_center_rot + pelvis_axes_rot[:, 1] * (-pelvis_size[1] * 0.5) + pelvis_axes_rot[:, 2] * (
+        pelvis_size[2] * 0.5
+    )
+    front_dir = pelvis_axes[:, 2]
+    if np.dot(bottom_candidate - bottom_original, front_dir) < 0:
+        pelvis_axes_rot, pelvis_center_rot = _rotated_axes(sign=-1.0)
+
+    original_height = pelvis_size[1]
+    new_height = original_height * 0.85
+    bottom_center = pelvis_center_rot + pelvis_axes_rot[:, 1] * (-original_height * 0.5)
+    pelvis_center_rot = bottom_center + pelvis_axes_rot[:, 1] * (new_height * 0.5)
+    pelvis_size = (pelvis_size[0], new_height, pelvis_size[2])
+
+    pelvis = OrientedBox("pelvis", pelvis_center_rot, pelvis_axes_rot, pelvis_size)
 
     ribcage_axis_x = _normalize(rshoulder - lshoulder)
     ribcage_axis_y = _normalize(hip_center - shoulder_center)
@@ -337,28 +373,61 @@ def compute_oriented_boxes(landmarks_3d: np.ndarray) -> List[OrientedBox]:
     shoulder_to_hip = np.linalg.norm(shoulder_center - hip_center)
     ribcage_height = shoulder_to_hip * 0.65
     ribcage_center = shoulder_center + ribcage_axis_y * (ribcage_height * 0.25)
+    original_ribcage_height = max(ribcage_height * 0.8, 1e-3)
+    new_ribcage_height = original_ribcage_height * 0.9
+    ribcage_bottom = ribcage_center + ribcage_axis_y * (-original_ribcage_height * 0.5)
+    ribcage_center = ribcage_bottom + ribcage_axis_y * (new_ribcage_height * 0.5)
     ribcage_size = (
         max(shoulder_width * 0.85, 1e-3),
-        max(ribcage_height * 0.8, 1e-3),
+        new_ribcage_height,
         max(shoulder_width * 0.45, 1e-3),
     )
+    front_hint = nose - shoulder_center
+    offset_dir = ribcage_axis_z if np.dot(ribcage_axis_z, front_hint) >= 0 else -ribcage_axis_z
+    ribcage_center = ribcage_center + offset_dir * (ribcage_size[2] * 0.35)
     ribcage = OrientedBox("ribcage", ribcage_center, ribcage_axes, ribcage_size)
 
     head_center = nose + (nose - shoulder_center) * 0.2
     ear_width = np.linalg.norm(right_ear - left_ear) if np.any(right_ear) else shoulder_width * 0.4
     head_height = torso_height * 0.35 if torso_height > 1e-3 else hip_width * 0.8
-    head_axes = _frame_from_direction(right_ear - left_ear, nose - shoulder_center)
-    head_size = (
-        max(ear_width * 1.1, 1e-3),
-        max(head_height, 1e-3),
-        max(ear_width * 0.9, 1e-3),
-    )
+
+    spine_dir = _normalize(shoulder_center - hip_center)
+    if np.linalg.norm(spine_dir) < 1e-6:
+        spine_dir = _normalize(nose - shoulder_center)
+
+    forward_hint = nose - shoulder_center
+    if np.linalg.norm(forward_hint) < 1e-6:
+        forward_hint = nose - head_center
+    axis_forward = _normalize(forward_hint)
+
+    axis_side = np.cross(spine_dir, axis_forward)
+    if np.linalg.norm(axis_side) < 1e-6:
+        axis_side = rshoulder - lshoulder
+        axis_side = _normalize(axis_side)
+        axis_forward = _normalize(np.cross(axis_side, spine_dir))
+    else:
+        axis_side = _normalize(axis_side)
+        axis_forward = _normalize(np.cross(axis_side, spine_dir))
+
+    if np.dot(axis_forward, forward_hint) < 0:
+        axis_forward *= -1.0
+
+    axis_side = _normalize(np.cross(spine_dir, axis_forward))
+    head_axes = np.stack([axis_side, spine_dir, axis_forward], axis=1)
+
+    ear_extent = float(max(ear_width * 1.1, 1e-3))
+    height_extent = float(max(head_height, 1e-3))
+    long_extent = ear_extent
+    side_extent = height_extent
+    head_depth = max(ear_width * 0.9, 1e-3)
+    head_size = (long_extent, side_extent, head_depth)
+    head_center = head_center - axis_forward * (head_depth * 0.6)
     head = OrientedBox("head", head_center, head_axes, head_size)
 
     return [pelvis, ribcage, head]
 
 
-def compute_limb_segments(landmarks_3d: np.ndarray) -> List[LimbSegment]:
+def compute_limb_segments(landmarks_3d: np.ndarray) -> Tuple[List[LimbSegment], List[OrientedBox]]:
     limb_pairs = {
         "left_upper_arm": (LMS.LEFT_SHOULDER, LMS.LEFT_ELBOW),
         "left_forearm": (LMS.LEFT_ELBOW, LMS.LEFT_WRIST),
@@ -366,8 +435,10 @@ def compute_limb_segments(landmarks_3d: np.ndarray) -> List[LimbSegment]:
         "right_forearm": (LMS.RIGHT_ELBOW, LMS.RIGHT_WRIST),
         "left_thigh": (LMS.LEFT_HIP, LMS.LEFT_KNEE),
         "left_calf": (LMS.LEFT_KNEE, LMS.LEFT_ANKLE),
+        "left_foot": (LMS.LEFT_ANKLE, LMS.LEFT_FOOT_INDEX),
         "right_thigh": (LMS.RIGHT_HIP, LMS.RIGHT_KNEE),
         "right_calf": (LMS.RIGHT_KNEE, LMS.RIGHT_ANKLE),
+        "right_foot": (LMS.RIGHT_ANKLE, LMS.RIGHT_FOOT_INDEX),
     }
 
     segments: List[LimbSegment] = []
@@ -380,6 +451,22 @@ def compute_limb_segments(landmarks_3d: np.ndarray) -> List[LimbSegment]:
         "right_upper_arm": 0.12,
         "left_forearm": 0.09,
         "right_forearm": 0.09,
+        "left_foot": 0.09,
+        "right_foot": 0.09,
+    }
+    hand_indices = {
+        "left": {
+            "wrist": LMS.LEFT_WRIST,
+            "index": LMS.LEFT_INDEX,
+            "pinky": LMS.LEFT_PINKY,
+            "thumb": LMS.LEFT_THUMB,
+        },
+        "right": {
+            "wrist": LMS.RIGHT_WRIST,
+            "index": LMS.RIGHT_INDEX,
+            "pinky": LMS.RIGHT_PINKY,
+            "thumb": LMS.RIGHT_THUMB,
+        },
     }
     for name, (a_idx, b_idx) in limb_pairs.items():
         start = landmarks_3d[a_idx.value]
@@ -388,7 +475,33 @@ def compute_limb_segments(landmarks_3d: np.ndarray) -> List[LimbSegment]:
         scale = radius_scale.get(name, 0.1)
         radius = max(length * scale, 1e-3)
         segments.append(LimbSegment(name, start, end, radius))
-    return segments
+    hand_boxes: List[OrientedBox] = []
+    for side, idxs in hand_indices.items():
+        wrist = landmarks_3d[idxs["wrist"].value]
+        index_tip = landmarks_3d[idxs["index"].value]
+        pinky_tip = landmarks_3d[idxs["pinky"].value]
+        thumb_tip = landmarks_3d[idxs["thumb"].value]
+        palm_center = wrist * 0.4 + index_tip * 0.3 + pinky_tip * 0.2 + thumb_tip * 0.1
+        forward = _normalize((index_tip + pinky_tip) * 0.5 - wrist)
+        side_vec = _normalize(pinky_tip - index_tip)
+        if np.linalg.norm(side_vec) < 1e-6:
+            side_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        normal = _normalize(np.cross(forward, side_vec))
+        if np.linalg.norm(normal) < 1e-6:
+            normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        side_vec = _normalize(np.cross(normal, forward))
+        axes = np.stack([forward, side_vec, normal], axis=1)
+        length = np.linalg.norm((index_tip + pinky_tip) * 0.5 - wrist)
+        width = np.linalg.norm(pinky_tip - index_tip)
+        thickness = max(width * 0.2, 1e-3)
+        size = (
+            max(length * 1.1, 1e-3),
+            max(width * 1.05, 1e-3),
+            thickness,
+        )
+        hand_boxes.append(OrientedBox(f"{side}_hand", palm_center, axes, size))
+
+    return segments, hand_boxes
 
 
 def priority_landmarks() -> List[Tuple[LMS, str]]:
