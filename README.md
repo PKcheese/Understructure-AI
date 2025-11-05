@@ -2,6 +2,12 @@
 
 This folder now exposes the workflow in three progressively richer scripts so you can inspect each stage separately: landmark detection, gesture generation, and structure synthesis. A legacy `gesture_structure_pipeline.py` still runs the full chain in one go if you prefer.
 
+## Example Output
+
+![Gesture to maquette overlay](docs/example_image.png)
+
+The example above comes straight from the REST API using the default gesture and structure passes. It shows the annotated source photo alongside the generated 3D maquette overlay, so you can quickly sanity-check your setup before running the full pipeline.
+
 ## Setup
 
 ```bash
