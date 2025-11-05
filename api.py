@@ -7,8 +7,8 @@ Usage:
 
 POST /maquette with a multipart field named ``image`` (JPEG or PNG) and the
 response will stream back ``maquette_variants.zip`` containing the
-aligned, non-aligned, and stabilized maquette GLBs, a landmark-only export,
-the gesture overlay, and a preview PNG.
+aligned, non-aligned, stabilized, and interactive maquette GLBs, a landmark-only
+export, the gesture overlay, and a preview PNG.
 """
 
 from __future__ import annotations
@@ -31,13 +31,12 @@ from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 from starlette.background import BackgroundTask  # noqa: E402
 
 from pose_utils import (  # noqa: E402
-    build_gesture_curves,
     LMS,
     compute_limb_segments,
     compute_oriented_boxes,
-    draw_gesture_overlay,
     run_pose_estimation,
 )
+from generate_gesture import generate_gesture_assets  # noqa: E402
 from stabilize_landmarks import PoseStabilizer  # noqa: E402
 from render_structure_3d import (  # noqa: E402
     _apply_transform_to_metadata,
@@ -93,8 +92,9 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
     output_dir.mkdir(parents=True, exist_ok=True)
 
     image_bgr, k2d, k3d = run_pose_estimation(image_path)
-    gesture_curves = build_gesture_curves(k2d, iterations=3)
-    gesture_overlay = draw_gesture_overlay(image_bgr, gesture_curves, thickness=3)
+    gesture_path, _ = generate_gesture_assets(
+        image_bgr, k2d, output_dir, iterations=3, thickness=3, export_curves=False
+    )
     stabilizer = PoseStabilizer(ema_alpha=0.35)
     try:
         k3d_stabilized = stabilizer.stabilize(k3d, return_world=True)
@@ -134,6 +134,29 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
         )
         combined.export(target)
 
+    def _export_interactive_meshes(meshes_variant: Sequence[trimesh.Trimesh], target: Path) -> None:
+        scene = trimesh.Scene()
+        used: set[str] = set()
+
+        def _unique(name: str) -> str:
+            base = name or "part"
+            if base not in used:
+                used.add(base)
+                return base
+            idx = 2
+            while f"{base}_{idx}" in used:
+                idx += 1
+            unique_name = f"{base}_{idx}"
+            used.add(unique_name)
+            return unique_name
+
+        for mesh in meshes_variant:
+            metadata = (getattr(mesh, "metadata", {}) or {}).copy()
+            name = metadata.get("name") or metadata.get("segment") or metadata.get("type") or "part"
+            scene.add_geometry(mesh.copy(), node_name=_unique(name))
+
+        scene.export(target, file_type="glb")
+
     no_match_meshes = [mesh.copy() for mesh in meshes]
     _apply_mesh_transform(no_match_meshes, BASE_EXPORT_TRANSFORM)
     no_match_path = output_dir / "maquette_modified_rings_nomatch.glb"
@@ -172,6 +195,15 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
     preview_path = output_dir / "maquette_preview.png"
     cv2.imwrite(str(preview_path), preview_bgra)
 
+    interactive_meshes = [mesh.copy() for mesh in match_meshes]
+    _apply_mesh_transform(interactive_meshes, BASE_EXPORT_TRANSFORM)
+    interactive_path = output_dir / "maquette_interactive.glb"
+    _export_interactive_meshes(interactive_meshes, interactive_path)
+    if not interactive_path.exists():
+        print(f"Warning: interactive GLB was not created at {interactive_path}", flush=True)
+    else:
+        print(f"Interactive GLB created: {interactive_path.stat().st_size} bytes", flush=True)
+
     _apply_mesh_transform(match_meshes, BASE_EXPORT_TRANSFORM)
     match_path = output_dir / "maquette_modified_rings.glb"
     _export_variant(match_meshes, match_path)
@@ -180,9 +212,6 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
     _apply_mesh_transform(landmark_meshes_copy, BASE_EXPORT_TRANSFORM)
     landmarks_path = output_dir / "mediapipe_landmarks.glb"
     _export_variant(landmark_meshes_copy, landmarks_path)
-
-    gesture_path = output_dir / "gesture_overlay.png"
-    cv2.imwrite(str(gesture_path), gesture_overlay)
 
     zip_path = output_dir / "maquette_variants.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
@@ -193,6 +222,7 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
         zf.write(landmarks_path, arcname=landmarks_path.name)
         zf.write(preview_path, arcname=preview_path.name)
         zf.write(gesture_path, arcname=gesture_path.name)
+        zf.write(interactive_path, arcname=interactive_path.name)
 
     return {
         "zip": zip_path,
@@ -201,6 +231,7 @@ def _generate_maquette_assets(image_path: Path, output_dir: Path) -> dict[str, P
         "stabilized": stabilized_path,
         "landmarks": landmarks_path,
         "preview": preview_path,
+        "interactive": interactive_path,
         "gesture": gesture_path,
     }
 
@@ -253,6 +284,10 @@ async def make_maquette(request: Request, image: UploadFile = File(...)) -> File
     elif variant == "landmarks":
         response_path = assets["landmarks"]
         filename = "mediapipe_landmarks.glb"
+        media_type = "model/gltf-binary"
+    elif variant in {"interactive", "interactive_glb"}:
+        response_path = assets["interactive"]
+        filename = "maquette_interactive.glb"
         media_type = "model/gltf-binary"
     elif variant in {"stabilized", "stabilized_glb"}:
         response_path = assets["stabilized"]
