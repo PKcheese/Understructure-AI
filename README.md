@@ -1,4 +1,4 @@
-# Understructure AI — my sketching lab assistant
+# Understructure AI — A tool I built to help me paint better
 
 I’m an artist trying to sharpen my figure sketches and paintings. This project is my personal lab: drop in a reference photo, and it gives me gesture lines, structure overlays, and even a lightweight 3D maquette so I can study underlying forms before I touch pencil to paper.
 
